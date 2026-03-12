@@ -1,27 +1,128 @@
-# [BUILD FIRST]
-# ScannerManager — controls scanner assignment and scan lifecycle.
-# Zone preference: trauma/acuity-1 patients go to ED CT first.
-# Checks tech availability before assigning a patient to a scanner.
-# Manages multi-exam sequences (patient stays until all exams done).
-# Tracks scan timer and cooldown timer per scanner.
+# ScannerManager — controls the full lifecycle of a patient at the scanner.
+#
+# Sequence per patient visit:
+#   1. try_assign()  — pick an available scanner, start SETUP phase
+#   2. SETUP timer   — setup_delay from patient.transport (mobility-scaled)
+#                      scanner is SCANNING state throughout (room is occupied)
+#   3. SCAN timer    — exam scan_time from exam_catalog
+#   4. COOLDOWN      — SCANNER_COOLDOWN; table reset, room prep
+#   5. More exams?   — if patient.exam_list has remaining exams, go to step 2
+#   6. Done          — call transport_manager.register_outbound(patient)
+#                      scanner returns to IDLE
+#
+# Zone preference:
+#   Acuity tier 1 (Trauma/Stroke) → ED scanner first, fall back to Main
+#   All others                    → Main scanners first, fall back to ED
+#
+# Tech requirement:
+#   scanner.is_available requires assigned_tech is not None.
+#   Tech assignment is handled by StaffingManager — this class only checks.
 
 from classes.scanner import ScannerState
+from classes.patient import PatientState
+from config import SCANNER_COOLDOWN
+
+
+# Internal marker stored in scanner to distinguish SETUP phase from SCAN phase.
+# Avoids adding a new ScannerState to the enum just for this.
+_PHASE_SETUP = "setup"
+_PHASE_SCAN  = "scan"
 
 
 class ScannerManager:
-    def __init__(self, scanners: list):
-        # scanners: list of Scanner objects, passed in from game_loop
-        self.scanners = {s.scanner_id: s for s in scanners}
+    def __init__(self, scanners: list, transport_manager):
+        self.scanners          = {s.scanner_id: s for s in scanners}
+        self.transport_manager = transport_manager
+        # Track which phase each scanner is in: scanner_id -> _PHASE_SETUP | _PHASE_SCAN
+        self._phase            = {}
+        # Patient objects for patients currently on a scanner
+        self._active_patients  = {}   # scanner_id -> Patient
 
-    def try_assign(self, patient, exam_catalog: dict):
-        """Try to assign patient to an available scanner. Returns True if successful."""
-        # TODO: pick scanner by zone preference, check is_available,
-        #       set scanner state to SCANNING, attach patient
-        pass
+    # ------------------------------------------------------------------
+    def try_assign(self, patient, exam_catalog: dict) -> bool:
+        """
+        Attempt to assign patient to an available scanner.
+        Respects zone preference and tech availability.
+        Returns True if assigned, False if no scanner is available.
+        """
+        scanner = self._pick_scanner(patient.acuity)
+        if scanner is None:
+            return False
 
-    def tick(self, exam_catalog: dict):
-        """Advance scan and cooldown timers on all scanners."""
-        # TODO: count down scan_timer, transition to COOLDOWN,
-        #       count down cooldown_timer, transition back to IDLE,
-        #       handle multi-exam: if more exams remain, re-enter SCANNING
-        pass
+        exam_key = patient.exam_list[patient.current_exam_index]
+        exam     = exam_catalog[exam_key]
+
+        # Setup timer = patient's mobility-scaled table overhead.
+        # ScannerManager owns this phase (transport_manager rolled the value,
+        # stored it on patient.transport.setup_delay).
+        scanner.scan_timer      = patient.transport.setup_delay + exam.scan_time
+        scanner.cooldown_timer  = 0
+        scanner.current_patient = patient.patient_id
+        scanner.state           = ScannerState.SCANNING
+
+        self._phase[scanner.scanner_id]           = _PHASE_SETUP
+        self._active_patients[scanner.scanner_id] = patient
+        patient.state = PatientState.SCANNING
+
+        return True
+
+    # ------------------------------------------------------------------
+    def tick(self, exam_catalog: dict, game_seconds: int = 1):
+        """
+        Advance all scanner timers by game_seconds.
+
+        Handles state transitions:
+          SCANNING (setup+scan) → COOLDOWN → IDLE (or next exam's SCANNING)
+        Calls transport_manager.register_outbound() when all exams are done.
+        """
+        for sid, scanner in self.scanners.items():
+
+            if scanner.state == ScannerState.SCANNING:
+                scanner.scan_timer -= game_seconds
+                if scanner.scan_timer <= 0:
+                    scanner.state         = ScannerState.COOLDOWN
+                    scanner.cooldown_timer = SCANNER_COOLDOWN
+
+            elif scanner.state == ScannerState.COOLDOWN:
+                scanner.cooldown_timer -= game_seconds
+                if scanner.cooldown_timer <= 0:
+                    patient = self._active_patients.get(sid)
+                    if patient is None:
+                        scanner.state = ScannerState.IDLE
+                        continue
+
+                    patient.current_exam_index += 1
+                    remaining = patient.current_exam_index < len(patient.exam_list)
+
+                    if remaining:
+                        # More exams — reload setup+scan timer for next exam
+                        exam_key           = patient.exam_list[patient.current_exam_index]
+                        exam               = exam_catalog[exam_key]
+                        scanner.scan_timer = patient.transport.setup_delay + exam.scan_time
+                        scanner.state      = ScannerState.SCANNING
+                    else:
+                        # All done — free scanner, hand patient back to transport
+                        scanner.state           = ScannerState.IDLE
+                        scanner.current_patient = None
+                        scanner.scan_timer      = 0
+                        self._phase.pop(sid, None)
+                        self._active_patients.pop(sid, None)
+                        self.transport_manager.register_outbound(patient)
+
+    # ------------------------------------------------------------------
+    def _pick_scanner(self, acuity: int):
+        """
+        Return the best available scanner for this acuity tier, or None.
+        Tier 1 → prefer ED; all others → prefer Main.
+        Falls back to any available scanner if preferred zone is full.
+        """
+        prefer_ed    = (acuity == 1)
+        preferred    = "ED"   if prefer_ed else "Main"
+        fallback     = "Main" if prefer_ed else "ED"
+
+        # Try preferred zone first, then fallback
+        for zone in (preferred, fallback):
+            for scanner in self.scanners.values():
+                if scanner.zone == zone and scanner.is_available:
+                    return scanner
+        return None
