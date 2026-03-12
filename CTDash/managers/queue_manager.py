@@ -1,4 +1,8 @@
-# QueueManager — ordered list of patients waiting for a scanner.
+# QueueManager — the visible order queue.
+#
+# Patients are added at spawn and stay here until assigned to a scanner.
+# This includes patients in CONTRAST_ORDERED (oral contrast running),
+# IN_TRANSPORT (en route), and IN_HOLDING (physically in the bay).
 #
 # Priority rules (in order):
 #   1. acuity tier (1 = highest, 4 = lowest) — from acuity_table queue_priority
@@ -7,10 +11,12 @@
 # The heap stores (acuity, arrival_time, patient_id) tuples so Python's
 # min-heap gives us the right patient on every pop without a sort pass.
 #
-# Patients live here between IN_HOLDING and being handed to ScannerManager.
+# For scanner assignment use pop_holding() — it returns only IN_HOLDING patients.
+# pop_next() still exists but returns any state (used for display/debug).
 # wait_timer is incremented each tick regardless of state — scoring uses it.
 
 import heapq
+from classes.patient import PatientState
 
 
 class QueueManager:
@@ -72,6 +78,32 @@ class QueueManager:
                 continue
             return self._patients[pid]
         return None
+
+    def pop_holding(self):
+        """
+        Return the highest-priority patient currently IN_HOLDING — skips patients
+        still in CONTRAST_ORDERED or IN_TRANSPORT. Used by ScannerManager.
+        O(n) scan of active patients; queue size is small so this is fine.
+        """
+        best = None
+        best_key = None
+        for pid, patient in self._patients.items():
+            if patient.state != PatientState.IN_HOLDING:
+                continue
+            # Lower acuity number = higher priority; longer wait wins tiebreaker.
+            key = (patient.acuity, -patient.wait_timer)
+            if best is None or key < best_key:
+                best = patient
+                best_key = key
+        if best:
+            self._patients.pop(best.patient_id)
+            self._removed.add(best.patient_id)
+        return best
+
+    @property
+    def all_patients(self):
+        """All active patients in arrival order — for display / order list UI."""
+        return list(self._patients.values())
 
     @property
     def is_empty(self) -> bool:

@@ -9,7 +9,9 @@
 #      — exam pool is filtered to exams with min_level <= current_level
 #      — weighted by real volume from exam_catalog
 #   5. Roll mobility (distribution shifts toward stretcher for high acuity)
-#   6. Create Patient + Transport, hand to QueueManager + TransportManager
+#   6. Create Patient + Transport, hand to QueueManager
+#      If first exam requires oral contrast → ContrastManager starts timer (transport deferred)
+#      Otherwise → TransportManager dispatches immediately
 #
 # Level gating:
 #   - min_tier_level on each tier controls when emergencies unlock
@@ -37,10 +39,11 @@ _MOBILITY_BY_TIER = {
 
 
 class SpawnManager:
-    def __init__(self, level: int, queue_manager, transport_manager):
+    def __init__(self, level: int, queue_manager, transport_manager, contrast_manager):
         self.level             = level
         self.queue_manager     = queue_manager
         self.transport_manager = transport_manager
+        self.contrast_manager  = contrast_manager
         self._patient_counter  = 0
 
         # Build per-tier weighted exam pools at init (not every tick).
@@ -76,7 +79,14 @@ class SpawnManager:
             state=PatientState.ORDERED,
         )
 
-        self.transport_manager.assign_transport(patient)
+        # Oral contrast must complete before transport is dispatched.
+        # Patient appears in the order queue immediately regardless.
+        first_exam = EXAM_CATALOG.get(patient.exam_list[0])
+        if first_exam and first_exam.oral_contrast:
+            self.contrast_manager.start_oral_contrast(patient)
+        else:
+            self.transport_manager.assign_transport(patient)
+
         self.queue_manager.add_patient(patient, game_time)
 
     # ------------------------------------------------------------------

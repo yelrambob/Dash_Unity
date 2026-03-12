@@ -2,10 +2,18 @@
 # Patient class — the core game object.
 #
 # Full state machine:
-#   Ordered > InTransport > InHolding >
-#   ContrastOrdered > ContrastReady >
-#   InjectorReady > Scanning > Cooldown >
-#   Leaving > Completed | Refused | Holdover
+#   ORDERED
+#     → CONTRAST_ORDERED  (oral contrast timer running; patient still in their room)
+#     → IN_TRANSPORT       (oral contrast done, transport dispatched — OR immediate for no-oral exams)
+#     → IN_HOLDING         (arrived in CT holding bay)
+#     → INJECTOR_READY     (IV injector filled, ready to scan; skipped for non-IV exams)
+#     → SCANNING
+#     → COOLDOWN
+#     → LEAVING
+#     → COMPLETED | REFUSED | HOLDOVER
+#
+# Key rule: transport is NEVER called until oral contrast timer is finished.
+# Patients in CONTRAST_ORDERED are visible in the order queue with a countdown timer.
 
 from dataclasses import dataclass, field
 from enum import Enum, auto

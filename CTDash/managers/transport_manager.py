@@ -33,9 +33,10 @@ class TransportManager:
     # ------------------------------------------------------------------
     def assign_transport(self, patient):
         """
-        Called on patient spawn (ORDERED state).
-        Rolls all three delay values and scales by the appropriate mobility mult.
-        Kicks off the INBOUND phase immediately.
+        Dispatch transport for a patient.
+        Called at spawn for non-oral-contrast exams, or by ContrastManager
+        once the oral contrast timer has expired.
+        Rolls all three delay values and kicks off the INBOUND phase.
         """
         t_mult = MOBILITY_TRANSPORT_MULT.get(patient.mobility, 1.0)
         s_mult = MOBILITY_SETUP_MULT.get(patient.mobility, 1.0)
@@ -47,6 +48,7 @@ class TransportManager:
 
         t.state = TransportState.INBOUND
         t.timer = t.inbound_delay
+        patient.state = PatientState.IN_TRANSPORT
         self._inbound[patient.patient_id] = patient
 
     # ------------------------------------------------------------------
