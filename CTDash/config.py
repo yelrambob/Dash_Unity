@@ -66,6 +66,17 @@ LEVELS = {
     # Level 5 = your real Monday/Friday full shift. Endgame.
 }
 
+# --- Mobility transport multipliers ---------------------------------------
+# Applied to ALL three transport delay phases (arrival, hold_wait, leaving).
+# Ambulatory patients can meet the transporter; stretcher patients add prep time
+# at every phase. Multiplier is applied during assign_transport(), so the random
+# roll happens first and is then scaled — keeps variance but shifts the mean.
+MOBILITY_TRANSPORT_MULT = {
+    "ambulatory": 0.7,    # moves under own power — arrives faster, less prep
+    "wheelchair": 1.0,    # baseline
+    "stretcher":  1.5,    # full bed transfer — every phase takes longer
+}
+
 # --- Simulation tick ------------------------------------------------------
 TICK_SECONDS = 1    # how many game-seconds pass per simulation tick
                     # Keep this at 1 unless performance becomes a problem.
