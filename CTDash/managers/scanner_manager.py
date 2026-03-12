@@ -77,6 +77,12 @@ class ScannerManager:
         """
         for sid, scanner in self.scanners.items():
 
+            # If the active patient has a pending acknowledgment (REFUSED/CANCELLED),
+            # freeze the scanner until EventManager.acknowledge() calls release_patient().
+            active = self._active_patients.get(sid)
+            if active is not None and active.pending_acknowledgment:
+                continue
+
             if scanner.state == ScannerState.SCANNING:
                 scanner.scan_timer -= game_seconds
                 if scanner.scan_timer <= 0:
@@ -108,6 +114,22 @@ class ScannerManager:
                         self._phase.pop(sid, None)
                         self._active_patients.pop(sid, None)
                         self.transport_manager.register_outbound(patient)
+
+    # ------------------------------------------------------------------
+    def release_patient(self, scanner_id: str):
+        """
+        Free a scanner that is holding a REFUSED or CANCELLED patient.
+        Called by EventManager.acknowledge() after the player dismisses the event.
+        The patient's outbound transport is handled separately by EventManager.
+        """
+        scanner = self.scanners.get(scanner_id)
+        if scanner:
+            scanner.state           = ScannerState.IDLE
+            scanner.current_patient = None
+            scanner.scan_timer      = 0
+            scanner.cooldown_timer  = 0
+        self._phase.pop(scanner_id, None)
+        self._active_patients.pop(scanner_id, None)
 
     # ------------------------------------------------------------------
     def _pick_scanner(self, acuity: int):

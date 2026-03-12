@@ -53,3 +53,15 @@ class Patient:
     wait_timer:    int = 0              # total game-seconds spent waiting
     contrast_timer: int = 0            # counts down oral contrast wait
     current_exam_index: int = 0        # index into exam_list for multi-exam patients
+
+    # --- Event fields (REFUSED / CANCELLED) --------------------------------
+    # Set by EventManager when a random event fires. UI should display event_reason
+    # in a popup and block further interaction until the player acknowledges it.
+    pending_acknowledgment: bool = False   # True = player must tap to dismiss
+    event_reason:  Optional[str] = None    # displayed reason string
+    requires_outbound: bool = False        # True if patient is physically in bay/scanner
+                                           # when event fires — slot held until acknowledged,
+                                           # then outbound transport is dispatched
+    terminal_state: "PatientState" = field(default=None)
+    # terminal_state is set by EventManager so transport knows what final state
+    # to assign on departure (REFUSED / CANCELLED rather than COMPLETED).

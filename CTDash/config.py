@@ -90,6 +90,16 @@ MOBILITY_SETUP_MULT = {
     "stretcher":  1.9,    # full lateral transfer + positioning + reverse — the real cost
 }
 
+# --- Event probabilities (per patient per game-second) --------------------
+# Checked once per patient per tick against all pre-terminal patients.
+# At ~300 game-second average patient lifetime and ~20 concurrent patients:
+#   CANCEL: ~2% lifetime chance → roughly 1–2 cancellations per full shift
+#   REFUSE: ~0.5% lifetime chance → roughly 0–1 refusals per full shift
+# REFUSED is rarer than CANCELLED — it is genuinely uncommon for a patient
+# to refuse a CT that was ordered.  Cancellations are the more common surprise.
+EVENT_CANCEL_PROB = 0.000067   # per patient per game-second
+EVENT_REFUSE_PROB = 0.000017   # per patient per game-second
+
 # --- Simulation tick ------------------------------------------------------
 TICK_SECONDS = 1    # how many game-seconds pass per simulation tick
                     # Keep this at 1 unless performance becomes a problem.

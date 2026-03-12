@@ -89,7 +89,8 @@ class TransportManager:
             patient.transport.timer -= game_seconds
             if patient.transport.timer <= 0:
                 patient.transport.state = TransportState.DONE
-                patient.state = PatientState.COMPLETED
+                # Use terminal_state if set (REFUSED/CANCELLED); default to COMPLETED.
+                patient.state = patient.terminal_state or PatientState.COMPLETED
                 departed.append(patient)
                 del self._outbound[pid]
 

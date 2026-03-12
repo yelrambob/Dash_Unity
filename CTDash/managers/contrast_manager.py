@@ -49,6 +49,14 @@ class ContrastManager:
 
         return ready
 
+    def cancel_patient(self, patient_id: str):
+        """
+        Remove a patient from oral contrast tracking.
+        Called by EventManager when a REFUSED/CANCELLED event is acknowledged
+        for a patient who had not yet been transported (no physical presence).
+        """
+        self._oral_timers.pop(patient_id, None)
+
     def timer_for(self, patient_id):
         """Return remaining oral contrast seconds, or None if not tracking."""
         p = self._oral_timers.get(patient_id)
