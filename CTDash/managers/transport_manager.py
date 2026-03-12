@@ -1,18 +1,25 @@
-# TransportManager — handles all patient movement delays.
-# Runs the Transport state machine for each active patient.
-# Generates random delay values within config ranges on patient spawn,
-# then scales them by the patient's mobility multiplier.
+# TransportManager — patient movement: inbound and outbound only.
+# Setup (table on / scan / table off) is owned by ScannerManager.
 #
-# State flow per patient:
-#   WAITING_ASSIGNMENT -> (arrival_delay elapses) -> ACKNOWLEDGED
-#   ACKNOWLEDGED       -> (hold_wait elapses)      -> ON_WAY
-#   ON_WAY             -> timer=0                  -> DELIVERED  (patient moves to holding)
-#   [post-scan]        -> re-registered            -> DELIVERED  (leaving_delay used externally)
+# Phase ownership:
+#   TransportManager  →  inbound_delay   (call + deliver to scanner area)
+#   ScannerManager    →  setup_delay     (table on / position / table off)
+#   TransportManager  →  leaving_delay   (post-scan pickup + exit from dept)
+#
+# State flow managed here:
+#   INBOUND  — counting down inbound_delay
+#              expires → patient.state = IN_HOLDING, removed from _inbound
+#   OUTBOUND — counting down leaving_delay  (re-registered by ScannerManager post-scan)
+#              expires → patient.state = COMPLETED, removed from _outbound
+#
+# assign_transport()    : called on patient spawn — rolls and scales all three delays
+# register_outbound()   : called by ScannerManager when scan + setup are done
+# tick()                : advances both inbound and outbound queues each game tick
 
 import random
 from config import (
-    TRANSPORT_ARRIVAL_DELAY, TRANSPORT_HOLD_WAIT,
-    TRANSPORT_LEAVING_DELAY, MOBILITY_TRANSPORT_MULT,
+    TRANSPORT_INBOUND, SCANNER_SETUP, TRANSPORT_OUTBOUND,
+    MOBILITY_TRANSPORT_MULT, MOBILITY_SETUP_MULT,
 )
 from classes.transport import TransportState
 from classes.patient import PatientState
@@ -20,53 +27,68 @@ from classes.patient import PatientState
 
 class TransportManager:
     def __init__(self):
-        self._active = {}    # patient_id -> Patient
+        self._inbound  = {}   # patient_id -> Patient  (INBOUND phase)
+        self._outbound = {}   # patient_id -> Patient  (OUTBOUND phase)
 
+    # ------------------------------------------------------------------
     def assign_transport(self, patient):
-        """Called when a patient is ordered. Rolls random delays then scales by mobility."""
-        mult = MOBILITY_TRANSPORT_MULT.get(patient.mobility, 1.0)
+        """
+        Called on patient spawn (ORDERED state).
+        Rolls all three delay values and scales by the appropriate mobility mult.
+        Kicks off the INBOUND phase immediately.
+        """
+        t_mult = MOBILITY_TRANSPORT_MULT.get(patient.mobility, 1.0)
+        s_mult = MOBILITY_SETUP_MULT.get(patient.mobility, 1.0)
 
-        patient.transport.arrival_delay = int(random.randint(*TRANSPORT_ARRIVAL_DELAY) * mult)
-        patient.transport.hold_wait     = int(random.randint(*TRANSPORT_HOLD_WAIT)     * mult)
-        patient.transport.leaving_delay = int(random.randint(*TRANSPORT_LEAVING_DELAY) * mult)
+        t = patient.transport
+        t.inbound_delay  = int(random.randint(*TRANSPORT_INBOUND)  * t_mult)
+        t.setup_delay    = int(random.randint(*SCANNER_SETUP)       * s_mult)
+        t.leaving_delay  = int(random.randint(*TRANSPORT_OUTBOUND)  * t_mult)
 
-        # Kick off the first phase
-        patient.transport.timer = patient.transport.arrival_delay
-        self._active[patient.patient_id] = patient
+        t.state = TransportState.INBOUND
+        t.timer = t.inbound_delay
+        self._inbound[patient.patient_id] = patient
 
+    # ------------------------------------------------------------------
+    def register_outbound(self, patient):
+        """
+        Called by ScannerManager when setup + scan are done.
+        Starts the OUTBOUND phase — patient is waiting for pickup to leave dept.
+        """
+        t = patient.transport
+        t.state = TransportState.OUTBOUND
+        t.timer = t.leaving_delay
+        patient.state = PatientState.LEAVING
+        self._outbound[patient.patient_id] = patient
+
+    # ------------------------------------------------------------------
     def tick(self, game_seconds=1):
         """
-        Advance transport timers for all active patients by game_seconds.
-        State transitions:
-            WAITING_ASSIGNMENT: count down arrival_delay -> ACKNOWLEDGED, load hold_wait
-            ACKNOWLEDGED:       count down hold_wait     -> ON_WAY  (timer=0, immediate advance)
-            ON_WAY:             no further timer here; delivery is instant on transition
-        Patients are removed from _active once DELIVERED.
-        Returns list of patients that reached DELIVERED this tick (caller queues them to holding).
+        Advance inbound and outbound timers.
+
+        Returns:
+            delivered  — list of patients that finished INBOUND this tick
+                         (caller should hand to HoldingBay / ScannerManager)
+            departed   — list of patients that finished OUTBOUND this tick
+                         (caller should mark as COMPLETED and remove from sim)
         """
         delivered = []
+        departed  = []
 
-        for pid, patient in list(self._active.items()):
-            t = patient.transport
-            t.timer -= game_seconds
-
-            if t.timer > 0:
-                continue
-
-            # Timer expired — advance state
-            if t.state == TransportState.WAITING_ASSIGNMENT:
-                t.state = TransportState.ACKNOWLEDGED
-                t.timer = t.hold_wait
-
-            elif t.state == TransportState.ACKNOWLEDGED:
-                t.state = TransportState.ON_WAY
-                t.timer = 0
-                # ON_WAY is instantaneous in this model — transporter is already
-                # moving; we mark delivery immediately and let the caller handle
-                # placing the patient into the holding bay.
-                t.state = TransportState.DELIVERED
+        for pid, patient in list(self._inbound.items()):
+            patient.transport.timer -= game_seconds
+            if patient.transport.timer <= 0:
+                patient.transport.state = TransportState.IN_SETUP  # ScannerManager takes over
                 patient.state = PatientState.IN_HOLDING
                 delivered.append(patient)
-                del self._active[pid]
+                del self._inbound[pid]
 
-        return delivered
+        for pid, patient in list(self._outbound.items()):
+            patient.transport.timer -= game_seconds
+            if patient.transport.timer <= 0:
+                patient.transport.state = TransportState.DONE
+                patient.state = PatientState.COMPLETED
+                departed.append(patient)
+                del self._outbound[pid]
+
+        return delivered, departed

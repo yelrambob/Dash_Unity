@@ -30,11 +30,13 @@ SCAN_TIMES = {
 SCANNER_COOLDOWN = 20
 
 # --- Transport delays (min, max) in game-seconds --------------------------
-# At TIME_SCALE these feel like brief pauses to the player.
-# Possible change: level difficulty could shift these ranges upward.
-TRANSPORT_ARRIVAL_DELAY  = (20,  60)   # time from order to transporter arriving
-TRANSPORT_HOLD_WAIT      = ( 5,  30)   # wait at pickup before moving
-TRANSPORT_LEAVING_DELAY  = ( 5,  20)   # time after scan before transporter picks up
+# Three phases. At TIME_SCALE these feel like brief pauses to the player.
+# Possible change: level difficulty could shift ranges upward.
+TRANSPORT_INBOUND  = (30,  90)   # call for patient + deliver to scanner area
+                                  #   (absorbs old arrival + hold_wait — one clean timer)
+SCANNER_SETUP      = (20,  55)   # table on / position / scan / table off
+                                  #   meaty middle phase; mobility matters most here
+TRANSPORT_OUTBOUND = (10,  30)   # transporter arrives post-scan, patient leaves dept
 
 # --- Contrast timings (in game-seconds) -----------------------------------
 # Oral contrast is a major pacing mechanic — patient is stuck waiting.
@@ -66,15 +68,26 @@ LEVELS = {
     # Level 5 = your real Monday/Friday full shift. Endgame.
 }
 
-# --- Mobility transport multipliers ---------------------------------------
-# Applied to ALL three transport delay phases (arrival, hold_wait, leaving).
-# Ambulatory patients can meet the transporter; stretcher patients add prep time
-# at every phase. Multiplier is applied during assign_transport(), so the random
-# roll happens first and is then scaled — keeps variance but shifts the mean.
+# --- Mobility multipliers -------------------------------------------------
+# Rolled delays are multiplied after the random draw, so variance is preserved
+# but the mean shifts. Two separate tables because setup is where it really bites.
+#
+# MOBILITY_TRANSPORT_MULT — applied to inbound_delay and leaving_delay.
+#   Ambulatory patients can meet the transporter / walk out; stretcher needs
+#   full bed logistics at each end.
 MOBILITY_TRANSPORT_MULT = {
-    "ambulatory": 0.7,    # moves under own power — arrives faster, less prep
+    "ambulatory": 0.75,   # can meet the transporter, walks out on own
     "wheelchair": 1.0,    # baseline
-    "stretcher":  1.5,    # full bed transfer — every phase takes longer
+    "stretcher":  1.35,   # bed logistics add time but transport is mostly waiting
+}
+
+# MOBILITY_SETUP_MULT — applied to setup_delay (table on / position / table off).
+#   This is where mobility really bites: stretcher → bed-to-table transfer,
+#   positioning aids, extra staff. Ambulatory just hops on.
+MOBILITY_SETUP_MULT = {
+    "ambulatory": 0.55,   # hops on table, minimal positioning
+    "wheelchair": 1.0,    # baseline — transfer assist needed
+    "stretcher":  1.9,    # full lateral transfer + positioning + reverse — the real cost
 }
 
 # --- Simulation tick ------------------------------------------------------
