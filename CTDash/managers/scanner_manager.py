@@ -2,18 +2,18 @@
 #
 # Sequence per patient visit:
 #   1. try_assign()  — pick an available scanner, start SETUP phase
-#   2. SETUP timer   — setup_delay from patient.transport (mobility-scaled)
-#                      scanner is SCANNING state throughout (room is occupied)
-#   3. SCAN timer    — exam scan_time × tech speed/knowledge multiplier
-#   4. COOLDOWN      — SCANNER_COOLDOWN × tech speed/accuracy multiplier
+#   2. SETUP timer   — setup_delay (mobility-scaled) × willingness_mult
+#   3. SCAN timer    — exam scan_time × speed_mult
+#   4. COOLDOWN      — SCANNER_COOLDOWN × speed_mult × accuracy_mult
 #   5. More exams?   — if patient.exam_list has remaining exams, go to step 2
 #   6. Done          — call transport_manager.register_outbound(patient)
 #                      scanner returns to IDLE
 #
-# Tech attribute scaling:
-#   scan_time   × speed_mult × knowledge_mult
-#   cooldown    × speed_mult × accuracy_mult
-#   setup_delay is mobility-scaled by TransportManager; not modified here.
+# Tech attribute → phase mapping:
+#   willingness → setup   (hustle getting patient on table)
+#   speed       → scan    (drives protocol execution speed)
+#   speed       → cooldown (minor — fast tech doesn't linger)
+#   accuracy    → cooldown (major — clean positioning = fast room reset)
 #
 # Zone preference:
 #   Acuity tier 1 (Trauma/Stroke) → ED scanner first, fall back to Main
@@ -27,7 +27,7 @@ from classes.scanner import ScannerState
 from classes.patient import PatientState
 from config import (
     SCANNER_COOLDOWN,
-    TECH_SCAN_SPEED_RANGE, TECH_SCAN_KNOWLEDGE_RANGE,
+    TECH_SCAN_SPEED_RANGE, TECH_SETUP_WILLINGNESS_RANGE,
     TECH_COOLDOWN_SPEED_RANGE, TECH_COOLDOWN_ACCURACY_RANGE,
 )
 
@@ -62,10 +62,11 @@ class ScannerManager:
         exam     = exam_catalog[exam_key]
         tech     = scanner.assigned_tech   # Tech object (guaranteed non-None by is_available)
 
-        # Setup delay is mobility-scaled (rolled by TransportManager) — unchanged.
-        # Scan time is scaled by tech speed and knowledge_base.
+        # Setup: mobility-scaled by TransportManager, then further scaled by tech willingness.
+        # Scan: scaled by tech speed.
+        setup     = int(patient.transport.setup_delay * self._setup_mult(tech))
         scan_time = int(exam.scan_time * self._scan_mult(tech))
-        scanner.scan_timer      = patient.transport.setup_delay + scan_time
+        scanner.scan_timer      = setup + scan_time
         scanner.cooldown_timer  = 0
         scanner.current_patient = patient.patient_id
         scanner.state           = ScannerState.SCANNING
@@ -116,8 +117,9 @@ class ScannerManager:
                         exam_key  = patient.exam_list[patient.current_exam_index]
                         exam      = exam_catalog[exam_key]
                         tech      = scanner.assigned_tech
+                        setup     = int(patient.transport.setup_delay * self._setup_mult(tech))
                         scan_time = int(exam.scan_time * self._scan_mult(tech))
-                        scanner.scan_timer = patient.transport.setup_delay + scan_time
+                        scanner.scan_timer = setup + scan_time
                         scanner.state      = ScannerState.SCANNING
                     else:
                         # All done — free scanner, hand patient back to transport
@@ -145,13 +147,17 @@ class ScannerManager:
         self._active_patients.pop(scanner_id, None)
 
     # ------------------------------------------------------------------
-    def _scan_mult(self, tech) -> float:
-        """Combined scan time multiplier from tech speed and knowledge_base."""
+    def _setup_mult(self, tech) -> float:
+        """Setup time multiplier from tech willingness."""
         if tech is None:
             return 1.0
-        speed_m = self._attr_mult(tech.speed,          TECH_SCAN_SPEED_RANGE)
-        know_m  = self._attr_mult(tech.knowledge_base, TECH_SCAN_KNOWLEDGE_RANGE)
-        return speed_m * know_m
+        return self._attr_mult(tech.willingness, TECH_SETUP_WILLINGNESS_RANGE)
+
+    def _scan_mult(self, tech) -> float:
+        """Scan time multiplier from tech speed."""
+        if tech is None:
+            return 1.0
+        return self._attr_mult(tech.speed, TECH_SCAN_SPEED_RANGE)
 
     def _cooldown_mult(self, tech) -> float:
         """Combined cooldown multiplier from tech speed and accuracy."""

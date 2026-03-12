@@ -27,14 +27,14 @@ class StaffingManager:
         # Build Tech objects from roster at init.
         self._all_techs = {
             row["id"]: Tech(
-                tech_id        = row["id"],
-                name           = row["name"],
-                speed          = row["speed"],
-                accuracy       = row["accuracy"],
-                willingness    = row["willingness"],
-                knowledge_base = row["knowledge_base"],
-                shift_start    = row["shift_start"],
-                shift_end      = row["shift_end"],
+                tech_id     = row["id"],
+                name        = row["name"],
+                speed       = row["speed"],
+                accuracy    = row["accuracy"],
+                willingness = row["willingness"],
+                diligence   = row["diligence"],
+                shift_start = row["shift_start"],
+                shift_end   = row["shift_end"],
             )
             for row in TECH_ROSTER
         }

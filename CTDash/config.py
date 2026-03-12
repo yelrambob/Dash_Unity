@@ -96,16 +96,37 @@ MOBILITY_SETUP_MULT = {
 GAME_DURATION_HOURS = 14   # 06:00 – 20:00
 
 # --- Tech attribute scaling -----------------------------------------------
-# Scan time   = setup_delay + exam.scan_time * speed_mult * knowledge_mult
-# Cooldown    = SCANNER_COOLDOWN * speed_mult * accuracy_mult
+# Each attribute drives one phase of the scan cycle:
+#
+#   Setup    = setup_delay * willingness_mult
+#   Scan     = exam.scan_time * speed_mult
+#   Cooldown = SCANNER_COOLDOWN * speed_mult * accuracy_mult
 #
 # Formula: mult = upper - attr * (upper - lower)
-#   attr = 1.0 (best tech) → lower bound (fastest)
-#   attr = 0.0 (worst)     → upper bound (slowest)
-TECH_SCAN_SPEED_RANGE       = (0.80, 1.20)  # speed    → ±20% on scan time
-TECH_SCAN_KNOWLEDGE_RANGE   = (0.95, 1.05)  # knowledge → ±5% on scan time
-TECH_COOLDOWN_SPEED_RANGE   = (0.75, 1.25)  # speed    → ±25% on cooldown
-TECH_COOLDOWN_ACCURACY_RANGE = (0.92, 1.08) # accuracy  → ±8% on cooldown
+#   attr = 1.0 (best tech) → lower bound (fastest / least error)
+#   attr = 0.0 (worst)     → upper bound (slowest / most error)
+TECH_SCAN_SPEED_RANGE        = (0.75, 1.25)  # speed       → ±25% on scan time
+TECH_SETUP_WILLINGNESS_RANGE = (0.85, 1.12)  # willingness → +12% slow / −15% fast on setup
+TECH_COOLDOWN_SPEED_RANGE    = (0.88, 1.12)  # speed       → ±12% on cooldown (minor effect)
+TECH_COOLDOWN_ACCURACY_RANGE = (0.80, 1.20)  # accuracy    → ±20% on cooldown (major effect)
+
+# --- Tech error probabilities ----------------------------------------------
+# Two distinct error tiers, each driven by a different attribute.
+# Actual probability per scan = BASE * (1.0 - attr * REDUCTION)
+# REDUCTION is sized so attr=1.0 gives near-zero probability.
+#
+# WRITTEN-UP errors (~1/500 at accuracy=0.5):
+#   Poor image quality, minor documentation gap, protocol deviation.
+#   Consequence: small score penalty + on-screen discipline event.
+#   Driven by: accuracy
+#
+# FIREABLE errors (very rare at diligence=0.5, near-zero at diligence=1.0):
+#   Wrong patient, wrong protocol, contrast given to allergic patient.
+#   Consequence: large score penalty; tech removal TBD.
+#   Driven by: diligence
+TECH_WRITEUP_BASE_PROB   = 0.002    # per scan; ~1/500 at diligence=0.5
+TECH_FIREABLE_BASE_PROB  = 0.0004   # per scan; ~1/2500 at diligence=0.5
+TECH_ERROR_ATTR_REDUCTION = 1.8     # multiplied by attr then subtracted; attr=1.0 → ~0 prob
 
 # --- Event probabilities (per patient per game-second) --------------------
 # Checked once per patient per tick against all pre-terminal patients.
