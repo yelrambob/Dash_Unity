@@ -34,7 +34,9 @@ _PHYSICAL_STATES = frozenset({
     PatientState.COOLDOWN,
 })
 
-# States where an event can fire (anything pre-terminal, pre-leaving).
+# States where an event can fire.
+# COOLDOWN is excluded — the scan has already run, images exist, the requisition
+# is legally complete. A patient cannot refuse or an MD cancel at that point.
 _ELIGIBLE_STATES = frozenset({
     PatientState.ORDERED,
     PatientState.CONTRAST_ORDERED,
@@ -42,7 +44,6 @@ _ELIGIBLE_STATES = frozenset({
     PatientState.IN_HOLDING,
     PatientState.INJECTOR_READY,
     PatientState.SCANNING,
-    PatientState.COOLDOWN,
 })
 
 
