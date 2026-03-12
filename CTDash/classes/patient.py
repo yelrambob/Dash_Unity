@@ -10,7 +10,7 @@
 #     → SCANNING
 #     → COOLDOWN
 #     → LEAVING
-#     → COMPLETED | REFUSED | HOLDOVER
+#     → COMPLETED | REFUSED | CANCELLED | HOLDOVER
 #
 # Key rule: transport is NEVER called until oral contrast timer is finished.
 # Patients in CONTRAST_ORDERED are visible in the order queue with a countdown timer.
@@ -32,7 +32,11 @@ class PatientState(Enum):
     COOLDOWN         = auto()
     LEAVING          = auto()
     COMPLETED        = auto()
-    REFUSED          = auto()
+    REFUSED          = auto()   # patient declined exam (personability-driven)
+    CANCELLED        = auto()   # TODO (future): MD cancelled the order mid-queue
+                                #   - very rare, random trigger on any pre-scan state
+                                #   - no score penalty (out of tech's control)
+                                #   - distinct from REFUSED so scoring can treat them differently
     HOLDOVER         = auto()
 
 
