@@ -6,13 +6,19 @@
 
 from config import TICK_SECONDS, GAME_DURATION_HOURS
 
-GAME_START_HOUR = 6    # simulation starts at 06:00
+GAME_START_HOUR = 7    # simulation starts at 07:00 (first tech clock-in)
+                       # TODO: make this level-configurable via shift_window[0]
 
 
 class ShiftTimer:
-    def __init__(self):
+    def __init__(self, duration_hours: int = None):
+        """
+        duration_hours: override GAME_DURATION_HOURS for this run.
+        Pass the level's shift window length (shift_window[1] - shift_window[0]).
+        """
         self._elapsed_seconds = 0
-        self._total_seconds   = GAME_DURATION_HOURS * 3600
+        hours = duration_hours if duration_hours is not None else GAME_DURATION_HOURS
+        self._total_seconds   = hours * 3600
 
     @property
     def game_hour(self) -> int:

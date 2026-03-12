@@ -79,6 +79,22 @@ class QueueManager:
             return self._patients[pid]
         return None
 
+    def peek_holding(self):
+        """
+        Return the highest-priority IN_HOLDING patient WITHOUT removing them.
+        Used by GameLoop to check before committing to scanner assignment.
+        """
+        best = None
+        best_key = None
+        for pid, patient in self._patients.items():
+            if patient.state != PatientState.IN_HOLDING:
+                continue
+            key = (patient.acuity, -patient.wait_timer)
+            if best is None or key < best_key:
+                best = patient
+                best_key = key
+        return best
+
     def pop_holding(self):
         """
         Return the highest-priority patient currently IN_HOLDING — skips patients

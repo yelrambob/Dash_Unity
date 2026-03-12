@@ -4,11 +4,16 @@
 #   1. try_assign()  — pick an available scanner, start SETUP phase
 #   2. SETUP timer   — setup_delay from patient.transport (mobility-scaled)
 #                      scanner is SCANNING state throughout (room is occupied)
-#   3. SCAN timer    — exam scan_time from exam_catalog
-#   4. COOLDOWN      — SCANNER_COOLDOWN; table reset, room prep
+#   3. SCAN timer    — exam scan_time × tech speed/knowledge multiplier
+#   4. COOLDOWN      — SCANNER_COOLDOWN × tech speed/accuracy multiplier
 #   5. More exams?   — if patient.exam_list has remaining exams, go to step 2
 #   6. Done          — call transport_manager.register_outbound(patient)
 #                      scanner returns to IDLE
+#
+# Tech attribute scaling:
+#   scan_time   × speed_mult × knowledge_mult
+#   cooldown    × speed_mult × accuracy_mult
+#   setup_delay is mobility-scaled by TransportManager; not modified here.
 #
 # Zone preference:
 #   Acuity tier 1 (Trauma/Stroke) → ED scanner first, fall back to Main
@@ -20,7 +25,11 @@
 
 from classes.scanner import ScannerState
 from classes.patient import PatientState
-from config import SCANNER_COOLDOWN
+from config import (
+    SCANNER_COOLDOWN,
+    TECH_SCAN_SPEED_RANGE, TECH_SCAN_KNOWLEDGE_RANGE,
+    TECH_COOLDOWN_SPEED_RANGE, TECH_COOLDOWN_ACCURACY_RANGE,
+)
 
 
 # Internal marker stored in scanner to distinguish SETUP phase from SCAN phase.
@@ -51,11 +60,12 @@ class ScannerManager:
 
         exam_key = patient.exam_list[patient.current_exam_index]
         exam     = exam_catalog[exam_key]
+        tech     = scanner.assigned_tech   # Tech object (guaranteed non-None by is_available)
 
-        # Setup timer = patient's mobility-scaled table overhead.
-        # ScannerManager owns this phase (transport_manager rolled the value,
-        # stored it on patient.transport.setup_delay).
-        scanner.scan_timer      = patient.transport.setup_delay + exam.scan_time
+        # Setup delay is mobility-scaled (rolled by TransportManager) — unchanged.
+        # Scan time is scaled by tech speed and knowledge_base.
+        scan_time = int(exam.scan_time * self._scan_mult(tech))
+        scanner.scan_timer      = patient.transport.setup_delay + scan_time
         scanner.cooldown_timer  = 0
         scanner.current_patient = patient.patient_id
         scanner.state           = ScannerState.SCANNING
@@ -86,8 +96,9 @@ class ScannerManager:
             if scanner.state == ScannerState.SCANNING:
                 scanner.scan_timer -= game_seconds
                 if scanner.scan_timer <= 0:
-                    scanner.state         = ScannerState.COOLDOWN
-                    scanner.cooldown_timer = SCANNER_COOLDOWN
+                    tech = scanner.assigned_tech
+                    scanner.state          = ScannerState.COOLDOWN
+                    scanner.cooldown_timer = int(SCANNER_COOLDOWN * self._cooldown_mult(tech))
 
             elif scanner.state == ScannerState.COOLDOWN:
                 scanner.cooldown_timer -= game_seconds
@@ -101,10 +112,12 @@ class ScannerManager:
                     remaining = patient.current_exam_index < len(patient.exam_list)
 
                     if remaining:
-                        # More exams — reload setup+scan timer for next exam
-                        exam_key           = patient.exam_list[patient.current_exam_index]
-                        exam               = exam_catalog[exam_key]
-                        scanner.scan_timer = patient.transport.setup_delay + exam.scan_time
+                        # More exams — reload with tech scaling for next exam
+                        exam_key  = patient.exam_list[patient.current_exam_index]
+                        exam      = exam_catalog[exam_key]
+                        tech      = scanner.assigned_tech
+                        scan_time = int(exam.scan_time * self._scan_mult(tech))
+                        scanner.scan_timer = patient.transport.setup_delay + scan_time
                         scanner.state      = ScannerState.SCANNING
                     else:
                         # All done — free scanner, hand patient back to transport
@@ -132,17 +145,43 @@ class ScannerManager:
         self._active_patients.pop(scanner_id, None)
 
     # ------------------------------------------------------------------
+    def _scan_mult(self, tech) -> float:
+        """Combined scan time multiplier from tech speed and knowledge_base."""
+        if tech is None:
+            return 1.0
+        speed_m = self._attr_mult(tech.speed,          TECH_SCAN_SPEED_RANGE)
+        know_m  = self._attr_mult(tech.knowledge_base, TECH_SCAN_KNOWLEDGE_RANGE)
+        return speed_m * know_m
+
+    def _cooldown_mult(self, tech) -> float:
+        """Combined cooldown multiplier from tech speed and accuracy."""
+        if tech is None:
+            return 1.0
+        speed_m = self._attr_mult(tech.speed,    TECH_COOLDOWN_SPEED_RANGE)
+        acc_m   = self._attr_mult(tech.accuracy, TECH_COOLDOWN_ACCURACY_RANGE)
+        return speed_m * acc_m
+
+    @staticmethod
+    def _attr_mult(attr: float, attr_range: tuple) -> float:
+        """
+        Map a tech attribute (0.0–1.0) to a timing multiplier.
+        attr=1.0 (best) → attr_range[0] (fastest)
+        attr=0.0 (worst) → attr_range[1] (slowest)
+        """
+        low, high = attr_range
+        return high - attr * (high - low)
+
+    # ------------------------------------------------------------------
     def _pick_scanner(self, acuity: int):
         """
         Return the best available scanner for this acuity tier, or None.
         Tier 1 → prefer ED; all others → prefer Main.
         Falls back to any available scanner if preferred zone is full.
         """
-        prefer_ed    = (acuity == 1)
-        preferred    = "ED"   if prefer_ed else "Main"
-        fallback     = "Main" if prefer_ed else "ED"
+        prefer_ed = (acuity == 1)
+        preferred = "ED"   if prefer_ed else "Main"
+        fallback  = "Main" if prefer_ed else "ED"
 
-        # Try preferred zone first, then fallback
         for zone in (preferred, fallback):
             for scanner in self.scanners.values():
                 if scanner.zone == zone and scanner.is_available:

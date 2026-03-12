@@ -90,6 +90,23 @@ MOBILITY_SETUP_MULT = {
     "stretcher":  1.9,    # full lateral transfer + positioning + reverse — the real cost
 }
 
+# --- Game duration --------------------------------------------------------
+# Default full shift length in game-hours. ShiftTimer imports this.
+# Eventually driven by level's shift_window; hardcoded here for now.
+GAME_DURATION_HOURS = 14   # 06:00 – 20:00
+
+# --- Tech attribute scaling -----------------------------------------------
+# Scan time   = setup_delay + exam.scan_time * speed_mult * knowledge_mult
+# Cooldown    = SCANNER_COOLDOWN * speed_mult * accuracy_mult
+#
+# Formula: mult = upper - attr * (upper - lower)
+#   attr = 1.0 (best tech) → lower bound (fastest)
+#   attr = 0.0 (worst)     → upper bound (slowest)
+TECH_SCAN_SPEED_RANGE       = (0.80, 1.20)  # speed    → ±20% on scan time
+TECH_SCAN_KNOWLEDGE_RANGE   = (0.95, 1.05)  # knowledge → ±5% on scan time
+TECH_COOLDOWN_SPEED_RANGE   = (0.75, 1.25)  # speed    → ±25% on cooldown
+TECH_COOLDOWN_ACCURACY_RANGE = (0.92, 1.08) # accuracy  → ±8% on cooldown
+
 # --- Event probabilities (per patient per game-second) --------------------
 # Checked once per patient per tick against all pre-terminal patients.
 # At ~300 game-second average patient lifetime and ~20 concurrent patients:

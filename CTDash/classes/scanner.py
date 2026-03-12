@@ -25,7 +25,7 @@ class Scanner:
     zone:            str          # "ED" or "Main"
     state:           ScannerState = field(default=ScannerState.IDLE)
     current_patient: Optional[str] = None    # patient_id or None
-    assigned_tech:   Optional[str] = None    # tech_id or None
+    assigned_tech:   object        = None    # Tech object or None (avoids circular import)
     scan_timer:      int = 0
     cooldown_timer:  int = 0
 
