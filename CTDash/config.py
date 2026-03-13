@@ -69,3 +69,8 @@ LEVELS = {
 # --- Simulation tick ------------------------------------------------------
 TICK_SECONDS = 1    # how many game-seconds pass per simulation tick
                     # Keep this at 1 unless performance becomes a problem.
+
+# --- Shift length ---------------------------------------------------------
+# Full playable span: 06:00 – 21:00 (15 hours covers every level's window).
+# ShiftTimer counts up to this value in game-seconds.
+GAME_DURATION_HOURS = 15
