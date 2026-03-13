@@ -37,3 +37,8 @@ sysinfo.txt
 # Packages
 Packages/manifest.json
 Packages/packages-lock.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
