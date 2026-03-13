@@ -66,6 +66,13 @@ LEVELS = {
     # Level 5 = your real Monday/Friday full shift. Endgame.
 }
 
+# --- Tech speed modifier --------------------------------------------------
+# When True, a tech's speed stat scales scan time.
+# Formula: scan_time * (1.0 + (1.0 - tech.speed) * 0.5)
+#   speed=1.0 → 1.0x (no change)   speed=0.5 → 1.25x   speed=0.2 → 1.4x
+# Leave False until live testing confirms it improves gameplay feel.
+USE_TECH_SPEED_MODIFIER = False
+
 # --- Simulation tick ------------------------------------------------------
 TICK_SECONDS = 1    # how many game-seconds pass per simulation tick
                     # Keep this at 1 unless performance becomes a problem.

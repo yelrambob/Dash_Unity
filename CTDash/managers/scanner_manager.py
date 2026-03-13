@@ -7,13 +7,15 @@
 
 from classes.patient import PatientState
 from classes.scanner import ScannerState
-from config import SCAN_TIMES, SCANNER_COOLDOWN
+from config import SCAN_TIMES, SCANNER_COOLDOWN, USE_TECH_SPEED_MODIFIER
 
 
 class ScannerManager:
-    def __init__(self, scanners: list):
+    def __init__(self, scanners: list, techs: dict = None):
         # scanners: list of Scanner objects, passed in from game_loop
+        # techs: optional dict of {tech_id: Tech} — needed for speed modifier
         self.scanners = {s.scanner_id: s for s in scanners}
+        self._techs = techs or {}
         # Holds Patient objects currently on a scanner, keyed by scanner_id.
         self._scanning_patients = {}
         # Patients whose all exams are done, ready for the game_loop to process.
@@ -37,7 +39,7 @@ class ScannerManager:
 
             scanner.state           = ScannerState.SCANNING
             scanner.current_patient = patient.patient_id
-            scanner.scan_timer      = SCAN_TIMES[exam_key]
+            scanner.scan_timer      = self._calc_scan_time(exam_key, scanner.assigned_tech)
             scanner.cooldown_timer  = 0
 
             patient.state           = PatientState.SCANNING
@@ -70,7 +72,7 @@ class ScannerManager:
                         if patient.current_exam_index < len(patient.exam_list):
                             # More exams to do — re-assign to same scanner immediately.
                             next_key           = patient.exam_list[patient.current_exam_index]
-                            scanner.scan_timer = SCAN_TIMES[next_key]
+                            scanner.scan_timer = self._calc_scan_time(next_key, scanner.assigned_tech)
                             scanner.state      = ScannerState.SCANNING
                             patient.state      = PatientState.SCANNING
                             self._scanning_patients[sid] = patient
@@ -78,3 +80,11 @@ class ScannerManager:
                             # All exams complete — queue for departure.
                             scanner.state = ScannerState.IDLE
                             self.completed_patients.append(patient)
+
+    def _calc_scan_time(self, exam_key: str, tech_id) -> int:
+        """Return scan time for exam_key, optionally modified by tech speed."""
+        base = SCAN_TIMES[exam_key]
+        if USE_TECH_SPEED_MODIFIER and tech_id and tech_id in self._techs:
+            speed = self._techs[tech_id].speed
+            return max(1, int(base * (1.0 + (1.0 - speed) * 0.5)))
+        return base
