@@ -39,7 +39,7 @@ TRANSPORT_LEAVING_DELAY  = ( 5,  20)   # time after scan before transporter pick
 # --- Contrast timings (in game-seconds) -----------------------------------
 # Oral contrast is a major pacing mechanic — patient is stuck waiting.
 # Possible change: acuity 1 patients could bypass oral contrast requirement.
-ORAL_CONTRAST_WAIT   = 180    # ~45 real game-minutes compressed; feels like ~12 real seconds
+ORAL_CONTRAST_WAIT   = 120    # ~30 real game-minutes compressed; feels like ~8 real seconds
 INJECTOR_FILL_TIME   =  20    # short but requires player attention
 
 # --- Holding bay capacity -------------------------------------------------
@@ -48,7 +48,7 @@ HOLDING_OVERFLOW_SLOTS = 3
 
 # --- Scoring --------------------------------------------------------------
 EXAM_BASE_SCORE          = 100    # points per completed exam
-WAIT_PENALTY_PER_MINUTE  =  10    # points lost per game-minute over wait threshold
+WAIT_PENALTY_PER_MINUTE  =   5    # points lost per game-minute over wait threshold
 OVERFLOW_PENALTY         =  50    # flat penalty per overflow patient
 HOLDOVER_PENALTY         = 150    # flat penalty per patient left at shift end
                                    # Possible change: holdover penalty scales with acuity
