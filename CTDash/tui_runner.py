@@ -13,10 +13,16 @@ Commands:
   trans <n>    Initiate transport for order #n        (status must be WAITING)
   scan <n>     Assign order #n to a scanner           (status must be IN_HOLDING)
   leave <n>    Start leaving transport for order #n   (status must be SCAN_COMPLETE)
-  add          Spawn a random test patient
+  add          Manually spawn a random patient
+  pause        Toggle auto-spawning on/off
   speed <f>    Set time multiplier (default 0.15: 1 game-sec = 0.15 real-sec)
   clear        Remove completed orders from the list
   q / quit     Exit
+
+Auto-spawning:
+  Patients appear automatically based on the HOURLY_SPAWN_TABLE (real dept data).
+  The game clock starts at 07:00. Volume is low at first (~7/hr) and ramps up
+  toward the midday peak (~17-18/hr between 11:00-16:00).
 
 Timing (at default speed 0.15):
   Transport arrival:  20-60 gs  →  3.0-9.0 real seconds
@@ -27,6 +33,10 @@ Timing (at default speed 0.15):
   Post-scan cooldown:    20 gs  →  3.0 real seconds
   Oral contrast wait:   180 gs  →  27.0 real seconds
   Leaving transport:   5-20 gs  →  0.75-3.0 real seconds
+
+  One game-hour passes every 9 real minutes at speed 0.15.
+  (3600 gs × 0.15 real-sec/gs = 540 real seconds = 9 min)
+  Use 'speed 0.5' to make the clock run faster and stress-test the spawn rate.
 """
 
 import curses
@@ -37,23 +47,26 @@ import os
 import sys
 
 # ---------------------------------------------------------------------------
-# Allow importing config from the CTDash/ directory regardless of cwd
+# Path setup — allow importing CTDash modules regardless of working directory
 # ---------------------------------------------------------------------------
 _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
+# ---------------------------------------------------------------------------
+# Config import
+# ---------------------------------------------------------------------------
 try:
     import config as cfg
-    SCAN_TIMES      = cfg.SCAN_TIMES
-    COOLDOWN_GS     = cfg.SCANNER_COOLDOWN
-    ARRIVAL_RANGE   = cfg.TRANSPORT_ARRIVAL_DELAY
-    HOLDWAIT_RANGE  = cfg.TRANSPORT_HOLD_WAIT
-    LEAVING_RANGE   = cfg.TRANSPORT_LEAVING_DELAY
-    ORAL_GS         = cfg.ORAL_CONTRAST_WAIT
-    INJECTOR_GS     = cfg.INJECTOR_FILL_TIME
-    BAY_PROPER      = cfg.HOLDING_PROPER_SLOTS
-    BAY_OVERFLOW    = cfg.HOLDING_OVERFLOW_SLOTS
+    SCAN_TIMES     = cfg.SCAN_TIMES
+    COOLDOWN_GS    = cfg.SCANNER_COOLDOWN
+    ARRIVAL_RANGE  = cfg.TRANSPORT_ARRIVAL_DELAY
+    HOLDWAIT_RANGE = cfg.TRANSPORT_HOLD_WAIT
+    LEAVING_RANGE  = cfg.TRANSPORT_LEAVING_DELAY
+    ORAL_GS        = cfg.ORAL_CONTRAST_WAIT
+    INJECTOR_GS    = cfg.INJECTOR_FILL_TIME
+    BAY_PROPER     = cfg.HOLDING_PROPER_SLOTS
+    BAY_OVERFLOW   = cfg.HOLDING_OVERFLOW_SLOTS
 except ImportError:
     SCAN_TIMES     = {"head": 20, "chest": 25, "spine": 30, "abdpel": 50,
                       "trauma_full": 70, "cta_head": 45, "cta_chest": 35, "extremity": 35}
@@ -67,7 +80,53 @@ except ImportError:
     BAY_OVERFLOW   = 3
 
 # ---------------------------------------------------------------------------
-# Lookup tables
+# Spawn table import
+# ---------------------------------------------------------------------------
+try:
+    from data.hourly_spawn_weights import HOURLY_SPAWN_TABLE
+except ImportError:
+    HOURLY_SPAWN_TABLE = {
+        7:  {"exams_per_hour":  7, "acuity_bias": 0.40},
+        8:  {"exams_per_hour": 10, "acuity_bias": 0.35},
+        9:  {"exams_per_hour": 13, "acuity_bias": 0.35},
+        10: {"exams_per_hour": 15, "acuity_bias": 0.30},
+        11: {"exams_per_hour": 17, "acuity_bias": 0.30},
+        12: {"exams_per_hour": 18, "acuity_bias": 0.30},
+        13: {"exams_per_hour": 17, "acuity_bias": 0.30},
+        14: {"exams_per_hour": 16, "acuity_bias": 0.30},
+        15: {"exams_per_hour": 16, "acuity_bias": 0.30},
+        16: {"exams_per_hour": 16, "acuity_bias": 0.35},
+        17: {"exams_per_hour": 15, "acuity_bias": 0.35},
+        18: {"exams_per_hour": 12, "acuity_bias": 0.40},
+        19: {"exams_per_hour":  9, "acuity_bias": 0.45},
+        20: {"exams_per_hour":  7, "acuity_bias": 0.50},
+    }
+
+try:
+    from data.acuity_table import ACUITY_TABLE
+    ACUITY_SPAWN_WEIGHTS = [
+        ACUITY_TABLE[1]["spawn_weight"],
+        ACUITY_TABLE[2]["spawn_weight"],
+        ACUITY_TABLE[3]["spawn_weight"],
+        ACUITY_TABLE[4]["spawn_weight"],
+    ]
+    ACUITY_EXAMS = {
+        1: ACUITY_TABLE[1]["typical_exams"],
+        2: ACUITY_TABLE[2]["typical_exams"],
+        3: ACUITY_TABLE[3]["typical_exams"],
+        4: ACUITY_TABLE[4]["typical_exams"],
+    }
+except ImportError:
+    ACUITY_SPAWN_WEIGHTS = [0.02, 0.03, 0.80, 0.15]
+    ACUITY_EXAMS = {
+        1: ["trauma_full", "head", "cta_head"],
+        2: ["cta_chest", "cta_head", "abdpel", "head"],
+        3: ["head", "abdpel", "chest", "spine", "cta_chest", "extremity"],
+        4: ["abdpel", "chest", "spine", "extremity", "head"],
+    }
+
+# ---------------------------------------------------------------------------
+# Static lookup tables
 # ---------------------------------------------------------------------------
 EXAM_META = {
     "head":        {"iv": False, "oral": False},
@@ -81,28 +140,24 @@ EXAM_META = {
 }
 
 ACUITY_LABEL = {1: "TRAUMA", 2: "CRITICAL", 3: "STAT", 4: "ROUTINE"}
-ACUITY_EXAMS = {
-    1: ["trauma_full", "cta_head"],
-    2: ["cta_chest", "cta_head", "abdpel"],
-    3: ["head", "chest", "spine", "abdpel", "extremity", "cta_chest"],
-    4: ["head", "chest", "spine", "extremity"],
-}
 
-DEFAULT_SPEED = 0.15   # real-seconds per game-second
+SHIFT_START_HOUR = 7    # game clock starts at 07:00
+DEFAULT_SPEED    = 0.15  # real-seconds per game-second
+
 
 # ---------------------------------------------------------------------------
 # Patient status constants
 # ---------------------------------------------------------------------------
 class S:
     WAITING        = "WAITING"
-    TRANS_ARRIVING = "TRANS_ARRIVING"   # transporter walking to patient
-    TRANS_ENROUTE  = "TRANS_ENROUTE"    # patient being brought to bay
+    TRANS_ARRIVING = "TRANS_ARRIVING"
+    TRANS_ENROUTE  = "TRANS_ENROUTE"
     IN_HOLDING     = "IN_HOLDING"
     ORAL_CONTRAST  = "ORAL_CONTRAST"
-    INJECTOR       = "INJECTOR"         # IV injector fill before scan
+    INJECTOR       = "INJECTOR"
     SCANNING       = "SCANNING"
     COOLDOWN       = "COOLDOWN"
-    SCAN_COMPLETE  = "SCAN_COMPLETE"    # waiting for 'leave' command
+    SCAN_COMPLETE  = "SCAN_COMPLETE"
     LEAVING        = "LEAVING"
     DONE           = "DONE"
 
@@ -112,33 +167,32 @@ class S:
 # ---------------------------------------------------------------------------
 class TUIPatient:
     def __init__(self, number: int, patient_id: str, acuity: int, exam: str):
-        self.number       = number
-        self.patient_id   = patient_id
-        self.acuity       = acuity
-        self.exam         = exam
-        self.scan_gs      = SCAN_TIMES[exam]
-        self.iv_contrast  = EXAM_META[exam]["iv"]
+        self.number        = number
+        self.patient_id    = patient_id
+        self.acuity        = acuity
+        self.exam          = exam
+        self.scan_gs       = SCAN_TIMES[exam]
+        self.iv_contrast   = EXAM_META[exam]["iv"]
         self.oral_contrast = EXAM_META[exam]["oral"]
 
-        self.status       = S.WAITING
-        self.timer        = 0.0    # real-seconds remaining in current phase
-        self.holding_slot = -1     # 0-indexed bay slot (-1 = not in bay)
-        self.scanner_idx  = -1     # 0-indexed scanner (-1 = not on scanner)
-        self.oral_done    = False  # tracks whether oral contrast has elapsed
+        self.status        = S.WAITING
+        self.timer         = 0.0
+        self.holding_slot  = -1
+        self.scanner_idx   = -1
+        self.oral_done     = False
 
-        # Pre-rolled transport times (game-seconds)
-        self.arrival_gs   = random.randint(*ARRIVAL_RANGE)
-        self.holdwait_gs  = random.randint(*HOLDWAIT_RANGE)
-        self.leaving_gs   = random.randint(*LEAVING_RANGE)
+        self.arrival_gs    = random.randint(*ARRIVAL_RANGE)
+        self.holdwait_gs   = random.randint(*HOLDWAIT_RANGE)
+        self.leaving_gs    = random.randint(*LEAVING_RANGE)
 
     def status_line(self) -> str:
         s, t = self.status, self.timer
         if s == S.WAITING:
             return "  WAITING"
         elif s == S.TRANS_ARRIVING:
-            return f"  TRANSPORT — transporter arriving  ({_fmt(t)})"
+            return f"  TRANSPORT \u2014 transporter arriving  ({_fmt(t)})"
         elif s == S.TRANS_ENROUTE:
-            return f"  TRANSPORT — en route to bay       ({_fmt(t)})"
+            return f"  TRANSPORT \u2014 en route to bay      ({_fmt(t)})"
         elif s == S.IN_HOLDING:
             slot = self.holding_slot + 1
             label = f"Overflow {slot - BAY_PROPER}" if self.holding_slot >= BAY_PROPER else f"Bay {slot}"
@@ -148,11 +202,9 @@ class TUIPatient:
         elif s == S.INJECTOR:
             return f"  INJECTOR FILL  ({_fmt(t)} remaining)"
         elif s == S.SCANNING:
-            sc = self.scanner_idx + 1
-            return f"  SCANNING [Scanner {sc}]  ({_fmt(t)} remaining)"
+            return f"  SCANNING [Scanner {self.scanner_idx + 1}]  ({_fmt(t)} remaining)"
         elif s == S.COOLDOWN:
-            sc = self.scanner_idx + 1
-            return f"  COOLDOWN [Scanner {sc}]  ({_fmt(t)} remaining)"
+            return f"  COOLDOWN [Scanner {self.scanner_idx + 1}]  ({_fmt(t)} remaining)"
         elif s == S.SCAN_COMPLETE:
             return f"  SCAN DONE  \u2190 type: leave {self.number}"
         elif s == S.LEAVING:
@@ -161,17 +213,13 @@ class TUIPatient:
             return "  COMPLETED \u2713"
         return f"  {s}"
 
-    @property
-    def is_active(self) -> bool:
-        return self.status not in (S.DONE,)
-
 
 class ScannerInfo:
     def __init__(self, scanner_id: str, zone: str, tech: str):
         self.scanner_id  = scanner_id
         self.zone        = zone
         self.tech        = tech
-        self.patient_num = None    # None = IDLE
+        self.patient_num = None
 
     @property
     def is_idle(self) -> bool:
@@ -182,13 +230,11 @@ class ScannerInfo:
 # Utility
 # ---------------------------------------------------------------------------
 def _fmt(secs: float) -> str:
-    """Format real-seconds as m:ss."""
     s = max(0, int(secs))
     return f"{s // 60}:{s % 60:02d}"
 
 
 def _saddstr(win, y: int, x: int, text: str, attr: int = 0):
-    """addstr clipped to window bounds."""
     try:
         h, w = win.getmaxyx()
         if y < 0 or y >= h or x >= w:
@@ -205,35 +251,57 @@ def _saddstr(win, y: int, x: int, text: str, attr: int = 0):
 # ---------------------------------------------------------------------------
 class TUIState:
     def __init__(self, speed: float = DEFAULT_SPEED, num_scanners: int = 2):
-        self.speed    = speed
-        self.patients : list = []
-        self.holding  : list = [None] * (BAY_PROPER + BAY_OVERFLOW)
+        self.speed       = speed
+        self.patients    : list = []
+        self.holding     : list = [None] * (BAY_PROPER + BAY_OVERFLOW)
 
-        _scanner_defs = [
+        _defs = [
             ("ED-1",   "ED",   "Alice"),
             ("Main-1", "Main", "Bob"),
             ("Main-2", "Main", "Carol"),
             ("Main-3", "Main", "Dan"),
         ]
-        self.scanners : list = [ScannerInfo(*_scanner_defs[i]) for i in range(min(num_scanners, 4))]
+        self.scanners    : list = [ScannerInfo(*_defs[i]) for i in range(min(num_scanners, 4))]
 
-        self.log      : list = []
-        self.lock     = threading.Lock()
-        self._next_n  = 1
-        self._last_t  = time.monotonic()
-        self._running = True
-        self._thread  = threading.Thread(target=self._tick_loop, daemon=True)
+        self.log         : list = []
+        self.lock        = threading.Lock()
+        self._next_n     = 1
+
+        # Game clock
+        self.game_elapsed_gs = 0.0   # game-seconds since 07:00
+        self._spawn_accum    = 0.0   # accumulated spawn probability
+        self.auto_spawn      = True
+
+        self._last_t     = time.monotonic()
+        self._running    = True
+        self._thread     = threading.Thread(target=self._tick_loop, daemon=True)
         self._thread.start()
 
     # ------------------------------------------------------------------
-    # Helpers (call under lock)
+    # Clock helpers
+    # ------------------------------------------------------------------
+    def _current_game_hour(self) -> int:
+        return min(23, SHIFT_START_HOUR + int(self.game_elapsed_gs / 3600))
+
+    def clock_str(self) -> str:
+        total_gs = int(self.game_elapsed_gs)
+        hour     = SHIFT_START_HOUR + total_gs // 3600
+        minute   = (total_gs % 3600) // 60
+        return f"{hour:02d}:{minute:02d}"
+
+    def exams_per_hour(self) -> int:
+        row = HOURLY_SPAWN_TABLE.get(self._current_game_hour(), {"exams_per_hour": 4})
+        return row["exams_per_hour"]
+
+    # ------------------------------------------------------------------
+    # Internal helpers (call under lock)
     # ------------------------------------------------------------------
     def _gs(self, game_seconds: int) -> float:
         return game_seconds * self.speed
 
     def _log(self, msg: str):
         self.log.append(msg)
-        if len(self.log) > 60:
+        if len(self.log) > 80:
             self.log.pop(0)
 
     def _get(self, num: int):
@@ -254,20 +322,41 @@ class TUIState:
                 return i
         return -1
 
-    # ------------------------------------------------------------------
-    # Public: spawn patient
-    # ------------------------------------------------------------------
-    def add_patient(self, acuity=None, exam=None):
+    def _make_patient(self, acuity=None, exam=None) -> TUIPatient:
         if acuity is None:
-            acuity = random.choices([1, 2, 3, 4], weights=[2, 3, 80, 15])[0]
+            acuity = random.choices([1, 2, 3, 4], weights=ACUITY_SPAWN_WEIGHTS)[0]
         if exam is None:
             exam = random.choice(ACUITY_EXAMS[acuity])
+        n = self._next_n
+        self._next_n += 1
+        return TUIPatient(n, f"PAT_{n:04d}", acuity, exam)
+
+    # ------------------------------------------------------------------
+    # Public: manual spawn
+    # ------------------------------------------------------------------
+    def add_patient(self, acuity=None, exam=None):
         with self.lock:
-            n = self._next_n
-            self._next_n += 1
-            p = TUIPatient(n, f"PAT_{n:04d}", acuity, exam)
+            p = self._make_patient(acuity, exam)
             self.patients.append(p)
-            self._log(f"Order #{n} arrived — {p.patient_id}  [{ACUITY_LABEL[acuity]}]  {exam.upper()}")
+            self._log(f"[{self.clock_str()}] Order #{p.number} \u2014 "
+                      f"{p.patient_id}  [{ACUITY_LABEL[p.acuity]}]  {p.exam.upper()}")
+
+    # ------------------------------------------------------------------
+    # Auto-spawn (called under lock from tick loop)
+    # ------------------------------------------------------------------
+    def _try_spawn(self, dt_gs: float):
+        if not self.auto_spawn:
+            return
+        row = HOURLY_SPAWN_TABLE.get(self._current_game_hour(), {"exams_per_hour": 4})
+        prob_per_gs = row["exams_per_hour"] / 3600.0
+        self._spawn_accum += prob_per_gs * dt_gs
+        # Spawn once per accumulator tick (one at a time, avoids bursts)
+        if self._spawn_accum >= 1.0:
+            self._spawn_accum -= 1.0
+            p = self._make_patient()
+            self.patients.append(p)
+            self._log(f"[{self.clock_str()}] Order #{p.number} \u2014 "
+                      f"{p.patient_id}  [{ACUITY_LABEL[p.acuity]}]  {p.exam.upper()}")
 
     # ------------------------------------------------------------------
     # Commands
@@ -281,8 +370,8 @@ class TUIState:
                 return f"#{num} is not WAITING (currently: {p.status})"
             p.status = S.TRANS_ARRIVING
             p.timer  = self._gs(p.arrival_gs)
-            self._log(f"#{num} {p.patient_id} — transport initiated  "
-                      f"(transporter arriving in {_fmt(p.timer)})")
+            self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                      f"transport initiated  (transporter arriving in {_fmt(p.timer)})")
             return ""
 
     def cmd_scan(self, num: int) -> str:
@@ -292,33 +381,29 @@ class TUIState:
                 return f"No order #{num}"
             if p.status != S.IN_HOLDING:
                 return f"#{num} must be IN_HOLDING to scan (currently: {p.status})"
-
-            # Oral contrast first (if not done yet)
             if p.oral_contrast and not p.oral_done:
                 p.status = S.ORAL_CONTRAST
                 p.timer  = self._gs(ORAL_GS)
-                self._log(f"#{num} {p.patient_id} — oral contrast started  "
-                          f"({_fmt(p.timer)} wait) — scan again when complete")
+                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                          f"oral contrast started  ({_fmt(p.timer)} wait)")
                 return ""
-
-            # Claim a scanner
             idx = self._free_scanner()
             if idx == -1:
                 return "No scanner available right now"
             sc = self.scanners[idx]
             sc.patient_num = num
             p.scanner_idx  = idx
-
             if p.iv_contrast:
                 p.status = S.INJECTOR
                 p.timer  = self._gs(INJECTOR_GS)
-                self._log(f"#{num} {p.patient_id} — injector fill on Scanner {idx+1}  "
-                          f"({_fmt(p.timer)} fill, then {_fmt(self._gs(p.scan_gs))} scan)")
+                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                          f"injector fill on Scanner {idx+1}  "
+                          f"({_fmt(p.timer)} fill \u2192 {_fmt(self._gs(p.scan_gs))} scan)")
             else:
                 p.status = S.SCANNING
                 p.timer  = self._gs(p.scan_gs)
-                self._log(f"#{num} {p.patient_id} — scanning on Scanner {idx+1}  "
-                          f"({_fmt(p.timer)} remaining)")
+                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                          f"scanning on Scanner {idx+1}  ({_fmt(p.timer)} remaining)")
             return ""
 
     def cmd_leave(self, num: int) -> str:
@@ -328,26 +413,33 @@ class TUIState:
                 return f"No order #{num}"
             if p.status != S.SCAN_COMPLETE:
                 return f"#{num} must be SCAN_COMPLETE (currently: {p.status})"
-            # Free holding bay
             if p.holding_slot >= 0:
                 self.holding[p.holding_slot] = None
                 p.holding_slot = -1
             p.status = S.LEAVING
             p.timer  = self._gs(p.leaving_gs)
-            self._log(f"#{num} {p.patient_id} — leaving, transport arriving in {_fmt(p.timer)}")
+            self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                      f"leaving  ({_fmt(p.timer)} remaining)")
             return ""
 
     def cmd_clear(self) -> str:
         with self.lock:
             before = len(self.patients)
             self.patients = [p for p in self.patients if p.status != S.DONE]
-            removed = before - len(self.patients)
-            return f"Cleared {removed} completed order(s)" if removed else "No completed orders to clear"
+            n = before - len(self.patients)
+            return f"Cleared {n} completed order(s)" if n else "No completed orders"
 
     def cmd_speed(self, factor: float) -> str:
         with self.lock:
             self.speed = max(0.01, min(20.0, factor))
             return f"Speed set to {self.speed:.2f}x"
+
+    def cmd_pause(self) -> str:
+        with self.lock:
+            self.auto_spawn = not self.auto_spawn
+            state = "ON" if self.auto_spawn else "OFF"
+            self._log(f"[{self.clock_str()}] Auto-spawn {state}")
+            return f"Auto-spawn {state}"
 
     # ------------------------------------------------------------------
     # Timer thread
@@ -357,16 +449,18 @@ class TUIState:
             time.sleep(0.05)
             now = time.monotonic()
             with self.lock:
-                dt = now - self._last_t
+                dt      = now - self._last_t
                 self._last_t = now
+                dt_gs   = dt / self.speed       # game-seconds elapsed this tick
+                self.game_elapsed_gs += dt_gs
+                self._try_spawn(dt_gs)
                 for p in self.patients:
                     self._advance(p, dt)
 
     def _advance(self, p: TUIPatient, dt: float):
         s = p.status
         if s in (S.WAITING, S.IN_HOLDING, S.SCAN_COMPLETE, S.DONE):
-            return  # no countdown running
-
+            return
         p.timer = max(0.0, p.timer - dt)
 
         if s == S.TRANS_ARRIVING and p.timer <= 0:
@@ -376,44 +470,48 @@ class TUIState:
         elif s == S.TRANS_ENROUTE and p.timer <= 0:
             slot = self._free_bay()
             if slot == -1:
-                self._log(f"\u26a0  HOLDING FULL — #{p.number} {p.patient_id} waiting outside!")
-                p.timer = self._gs(15)   # retry in 15 game-seconds
+                self._log(f"[{self.clock_str()}] \u26a0  HOLDING FULL \u2014 "
+                          f"#{p.number} {p.patient_id} waiting outside!")
+                p.timer = self._gs(15)
             else:
                 self.holding[slot] = p.number
                 p.holding_slot = slot
                 label = (f"Overflow {slot - BAY_PROPER + 1}"
                          if slot >= BAY_PROPER else f"Bay {slot + 1}")
                 p.status = S.IN_HOLDING
-                self._log(f"#{p.number} {p.patient_id} — arrived in {label}")
+                self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                          f"arrived in {label}")
 
         elif s == S.ORAL_CONTRAST and p.timer <= 0:
             p.oral_done = True
             p.status    = S.IN_HOLDING
-            self._log(f"#{p.number} {p.patient_id} — oral contrast complete, ready to scan")
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"oral contrast complete, ready to scan")
 
         elif s == S.INJECTOR and p.timer <= 0:
             p.status = S.SCANNING
             p.timer  = self._gs(p.scan_gs)
-            self._log(f"#{p.number} {p.patient_id} — injector done, now scanning  "
-                      f"({_fmt(p.timer)} remaining)")
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"injector done, now scanning  ({_fmt(p.timer)} remaining)")
 
         elif s == S.SCANNING and p.timer <= 0:
             p.status = S.COOLDOWN
             p.timer  = self._gs(COOLDOWN_GS)
-            sc = self.scanners[p.scanner_idx]
-            self._log(f"#{p.number} {p.patient_id} — scan complete, cooldown  ({_fmt(p.timer)})")
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"scan complete, cooldown  ({_fmt(p.timer)})")
 
         elif s == S.COOLDOWN and p.timer <= 0:
-            # Release scanner
             sc = self.scanners[p.scanner_idx]
             sc.patient_num = None
             p.scanner_idx  = -1
             p.status       = S.SCAN_COMPLETE
-            self._log(f"#{p.number} {p.patient_id} — SCAN COMPLETE  \u2190 type: leave {p.number}")
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"SCAN COMPLETE  \u2190 type: leave {p.number}")
 
         elif s == S.LEAVING and p.timer <= 0:
             p.status = S.DONE
-            self._log(f"#{p.number} {p.patient_id} — departed, exam complete \u2713")
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"departed, exam complete \u2713")
 
     def stop(self):
         self._running = False
@@ -423,20 +521,19 @@ class TUIState:
 # Curses colour pairs
 # ---------------------------------------------------------------------------
 CP_TITLE    = 1
-CP_TRAUMA   = 2    # red
-CP_CRITICAL = 3    # yellow
-CP_STAT     = 4    # green
-CP_ROUTINE  = 5    # default
-CP_DONE     = 6    # dim
-CP_HEADER   = 7    # cyan headers
-CP_WARN     = 8    # red warnings
-CP_SCANNER  = 9    # magenta
-CP_CMD      = 10   # yellow prompt
-CP_TRANS    = 11   # blue for transport
+CP_TRAUMA   = 2
+CP_CRITICAL = 3
+CP_STAT     = 4
+CP_ROUTINE  = 5
+CP_DONE     = 6
+CP_HEADER   = 7
+CP_WARN     = 8
+CP_SCANNER  = 9
+CP_CMD      = 10
+CP_TRANS    = 11
 
 ACUITY_CP = {1: CP_TRAUMA, 2: CP_CRITICAL, 3: CP_STAT, 4: CP_ROUTINE}
-
-STATUS_CP = {
+STATUS_CP  = {
     S.WAITING:        CP_ROUTINE,
     S.TRANS_ARRIVING: CP_TRANS,
     S.TRANS_ENROUTE:  CP_TRANS,
@@ -454,80 +551,74 @@ STATUS_CP = {
 def init_colors():
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(CP_TITLE,    curses.COLOR_BLACK,  curses.COLOR_CYAN)
-    curses.init_pair(CP_TRAUMA,   curses.COLOR_RED,    -1)
-    curses.init_pair(CP_CRITICAL, curses.COLOR_YELLOW, -1)
-    curses.init_pair(CP_STAT,     curses.COLOR_GREEN,  -1)
-    curses.init_pair(CP_ROUTINE,  -1,                  -1)
-    curses.init_pair(CP_DONE,     curses.COLOR_BLACK,  -1)
-    curses.init_pair(CP_HEADER,   curses.COLOR_CYAN,   -1)
-    curses.init_pair(CP_WARN,     curses.COLOR_RED,    -1)
-    curses.init_pair(CP_SCANNER,  curses.COLOR_MAGENTA,-1)
-    curses.init_pair(CP_CMD,      curses.COLOR_YELLOW, -1)
-    curses.init_pair(CP_TRANS,    curses.COLOR_BLUE,   -1)
+    curses.init_pair(CP_TITLE,    curses.COLOR_BLACK,   curses.COLOR_CYAN)
+    curses.init_pair(CP_TRAUMA,   curses.COLOR_RED,     -1)
+    curses.init_pair(CP_CRITICAL, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(CP_STAT,     curses.COLOR_GREEN,   -1)
+    curses.init_pair(CP_ROUTINE,  -1,                   -1)
+    curses.init_pair(CP_DONE,     curses.COLOR_BLACK,   -1)
+    curses.init_pair(CP_HEADER,   curses.COLOR_CYAN,    -1)
+    curses.init_pair(CP_WARN,     curses.COLOR_RED,     -1)
+    curses.init_pair(CP_SCANNER,  curses.COLOR_MAGENTA, -1)
+    curses.init_pair(CP_CMD,      curses.COLOR_YELLOW,  -1)
+    curses.init_pair(CP_TRANS,    curses.COLOR_BLUE,    -1)
 
 
 # ---------------------------------------------------------------------------
-# Drawing
+# Drawing helpers
 # ---------------------------------------------------------------------------
-def _hline(win, y: int, x: int, width: int, title: str = "", cp: int = CP_HEADER):
+def _hline(win, y: int, x: int, w: int, title: str = "", cp: int = CP_HEADER):
     attr = curses.color_pair(cp) | curses.A_BOLD
-    _saddstr(win, y, x, "\u2500" * width, attr)
+    _saddstr(win, y, x, "\u2500" * w, attr)
     if title:
         _saddstr(win, y, x + 2, f" {title} ", attr)
 
 
 def _draw_orders(win, state: TUIState, x: int, w: int, y0: int, y1: int):
-    total = len(state.patients)
-    _hline(win, y0, x, w, f"ORDERS [{total}]")
-    row = y0 + 1
-    lim = y1 - 1
+    active  = sum(1 for p in state.patients if p.status != S.DONE)
+    waiting = sum(1 for p in state.patients if p.status == S.WAITING)
+    _hline(win, y0, x, w - 1, f"ORDERS  active:{active}  waiting:{waiting}")
+    row, lim = y0 + 1, y1 - 1
 
+    shown = 0
     for p in state.patients:
-        if row >= lim:
+        if row >= lim - 1:
+            remaining = len(state.patients) - shown
+            if remaining > 0:
+                _saddstr(win, row, x + 1, f"  ... +{remaining} more orders",
+                         curses.color_pair(CP_HEADER))
             break
-        # Line 1: number + ID + acuity badge
+        shown += 1
         cp   = ACUITY_CP.get(p.acuity, CP_ROUTINE)
         attr = curses.color_pair(cp) | curses.A_BOLD
         if p.status == S.DONE:
             attr = curses.color_pair(CP_DONE) | curses.A_DIM
-        badge = ACUITY_LABEL[p.acuity]
-        _saddstr(win, row, x, f" #{p.number:<2} {p.patient_id}  [{badge}]", attr)
+        _saddstr(win, row, x,
+                 f" #{p.number:<3} {p.patient_id}  [{ACUITY_LABEL[p.acuity]}]", attr)
         row += 1
         if row >= lim:
             break
-
-        # Line 2: exam name
         _saddstr(win, row, x + 5, p.exam.upper(),
                  curses.color_pair(CP_DONE if p.status == S.DONE else CP_ROUTINE))
         row += 1
         if row >= lim:
             break
-
-        # Line 3: status label
-        s_cp   = STATUS_CP.get(p.status, CP_ROUTINE)
-        s_attr = curses.color_pair(s_cp)
+        s_attr = curses.color_pair(STATUS_CP.get(p.status, CP_ROUTINE))
         if p.status == S.DONE:
             s_attr = curses.color_pair(CP_DONE) | curses.A_DIM
         elif p.status == S.SCAN_COMPLETE:
             s_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
         _saddstr(win, row, x, p.status_line(), s_attr)
-        row += 1
-
-        # Blank separator
-        row += 1
+        row += 2   # +1 blank gap
 
 
 def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
-    _hline(win, y0, x, w, "HOLDING BAYS")
-    row = y0 + 1
-    lim = y1 - 1
+    _hline(win, y0, x, w - 1, "HOLDING BAYS")
+    row, lim = y0 + 1, y1 - 1
 
-    # Proper slots
     _saddstr(win, row, x + 1, f"\u2500\u2500 Proper ({BAY_PROPER} slots) \u2500\u2500",
              curses.color_pair(CP_HEADER))
     row += 1
-
     for i in range(BAY_PROPER):
         if row >= lim:
             break
@@ -539,9 +630,7 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             p = state._get(occ)
             if p:
                 cp = ACUITY_CP.get(p.acuity, CP_ROUTINE)
-                flag = " \u26a0 OVERFLOW" if i >= BAY_PROPER else ""
-                _saddstr(win, row, x + 1,
-                         f"  Slot {i+1}: #{occ} {p.exam.upper()}{flag}",
+                _saddstr(win, row, x + 1, f"  Slot {i+1}: #{occ} {p.exam.upper()}",
                          curses.color_pair(cp) | curses.A_BOLD)
         row += 1
 
@@ -550,7 +639,6 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
         _saddstr(win, row, x + 1, f"\u2500\u2500 Overflow ({BAY_OVERFLOW} slots) \u2500\u2500",
                  curses.color_pair(CP_WARN))
         row += 1
-
     for i in range(BAY_OVERFLOW):
         si = BAY_PROPER + i
         if row >= lim:
@@ -569,41 +657,33 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
 
 
 def _draw_scanners(win, state: TUIState, x: int, w: int, y0: int, y1: int):
-    _hline(win, y0, x, w, "SCANNERS")
-    row = y0 + 1
-    lim = y1 - 1
+    _hline(win, y0, x, w - 1, "SCANNERS")
+    row, lim = y0 + 1, y1 - 1
 
     for i, sc in enumerate(state.scanners):
-        if row + 4 >= lim:
+        if row + 3 >= lim:
             break
-
-        # Scanner header
-        label = f"Scanner {i+1}  [{sc.zone}]  Tech: {sc.tech}"
-        _saddstr(win, row, x + 1, label,
+        _saddstr(win, row, x + 1, f"Scanner {i+1}  [{sc.zone}]  Tech: {sc.tech}",
                  curses.color_pair(CP_SCANNER) | curses.A_BOLD)
         row += 1
 
         p = state._get(sc.patient_num) if sc.patient_num is not None else None
-
         if sc.is_idle:
             _saddstr(win, row, x + 3, "\u25cf IDLE",
                      curses.color_pair(CP_STAT) | curses.A_BOLD)
             row += 1
         elif p:
-            # Show phase
             phase_map = {
                 S.INJECTOR: ("INJECTOR FILL", CP_CRITICAL),
                 S.SCANNING: ("SCANNING",      CP_SCANNER),
                 S.COOLDOWN: ("COOLDOWN",      CP_CRITICAL),
             }
-            phase_label, phase_cp = phase_map.get(p.status, (p.status, CP_ROUTINE))
-            timer_str = f"  ({_fmt(p.timer)} rem)" if p.status in (S.INJECTOR, S.SCANNING, S.COOLDOWN) else ""
-            _saddstr(win, row, x + 3,
-                     f"\u25c8 {phase_label}{timer_str}",
-                     curses.color_pair(phase_cp) | curses.A_BOLD)
+            label, pcp = phase_map.get(p.status, (p.status, CP_ROUTINE))
+            timer_str = (f"  ({_fmt(p.timer)} rem)"
+                         if p.status in (S.INJECTOR, S.SCANNING, S.COOLDOWN) else "")
+            _saddstr(win, row, x + 3, f"\u25c8 {label}{timer_str}",
+                     curses.color_pair(pcp) | curses.A_BOLD)
             row += 1
-
-            # Patient info
             if row < lim:
                 cp = ACUITY_CP.get(p.acuity, CP_ROUTINE)
                 _saddstr(win, row, x + 5,
@@ -612,34 +692,44 @@ def _draw_scanners(win, state: TUIState, x: int, w: int, y0: int, y1: int):
                 row += 1
         else:
             row += 1
-
-        row += 1   # gap between scanners
+        row += 1
 
 
 def _draw_log(win, state: TUIState, y: int, log_h: int, width: int):
     _hline(win, y, 0, width, "LOG")
-    entries = state.log[-(log_h):]
+    entries = state.log[-(log_h - 1):]
     for i, entry in enumerate(reversed(entries)):
-        ly = y + log_h - i
+        ly = y + log_h - 1 - i
         if ly <= y:
             break
         _saddstr(win, ly, 2, entry, curses.color_pair(CP_ROUTINE))
 
 
-def _draw_cmdbar(win, cmd_buf: str, err: str, speed: float, height: int, width: int):
+def _draw_title(win, state: TUIState, width: int):
+    _saddstr(win, 0, 0, " " * (width - 1),
+             curses.color_pair(CP_TITLE) | curses.A_BOLD)
+    clock    = state.clock_str()
+    rate     = state.exams_per_hour()
+    paused   = "  \u23f8 SPAWNING PAUSED" if not state.auto_spawn else ""
+    left     = f"  CTDash TUI Test Runner"
+    right    = f"[\u23f0 {clock}]  [{rate}/hr]{paused}  speed:{state.speed:.2f}x  "
+    _saddstr(win, 0, 0, left,  curses.color_pair(CP_TITLE) | curses.A_BOLD)
+    _saddstr(win, 0, max(0, width - len(right) - 1), right,
+             curses.color_pair(CP_TITLE) | curses.A_BOLD)
+
+
+def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
     y_sep = height - 3
     y_hlp = height - 2
     y_inp = height - 1
     _hline(win, y_sep, 0, width)
-    help_txt = "trans <n>  scan <n>  leave <n>  add  clear  speed <f>  quit"
+    help_txt = "trans <n>  scan <n>  leave <n>  add  pause  clear  speed <f>  quit"
     _saddstr(win, y_hlp, 2, help_txt, curses.color_pair(CP_HEADER))
-    spd_txt = f"speed: {speed:.2f}x"
-    _saddstr(win, y_hlp, width - len(spd_txt) - 2, spd_txt, curses.color_pair(CP_HEADER))
-    _hline(win, y_inp - 1 if y_inp > 0 else y_inp, 0, 0)   # suppress, use separator above
     prompt = f"> {cmd_buf}"
     if err:
         _saddstr(win, y_inp, 1, prompt, curses.color_pair(CP_ROUTINE))
-        _saddstr(win, y_inp, len(prompt) + 3, f"  \u2190 {err}", curses.color_pair(CP_WARN))
+        _saddstr(win, y_inp, len(prompt) + 3, f"  \u2190 {err}",
+                 curses.color_pair(CP_WARN))
     else:
         _saddstr(win, y_inp, 1, prompt + "\u2588", curses.color_pair(CP_CMD))
 
@@ -648,26 +738,17 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
     win.erase()
     height, width = win.getmaxyx()
 
-    # Title bar
-    title = "  CTDash  TUI Test Runner  "
-    _saddstr(win, 0, 0, " " * (width - 1), curses.color_pair(CP_TITLE) | curses.A_BOLD)
-    _saddstr(win, 0, (width - len(title)) // 2, title,
-             curses.color_pair(CP_TITLE) | curses.A_BOLD)
-
-    # Layout: 3 columns | log strip | cmd bar
-    log_h    = 4
-    cmd_h    = 3
-    panel_h  = height - 1 - log_h - cmd_h
-    y0, y1   = 1, 1 + panel_h
-    log_y    = y1
+    log_h   = 5
+    cmd_h   = 3
+    panel_h = height - 1 - log_h - cmd_h
+    y0, y1  = 1, 1 + panel_h
+    log_y   = y1
 
     ow = max(28, int(width * 0.36))
     hw = max(20, int(width * 0.26))
     sw = width - ow - hw
-
     ox, hx, sx = 0, ow, ow + hw
 
-    # Vertical dividers
     for r in range(y0, y1):
         try:
             win.addch(r, hx - 1, curses.ACS_VLINE, curses.color_pair(CP_HEADER))
@@ -676,11 +757,12 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
             pass
 
     with state.lock:
-        _draw_orders(win, state, ox, ow - 1, y0, y1)
-        _draw_holding(win, state, hx, hw - 1, y0, y1)
-        _draw_scanners(win, state, sx, sw - 1, y0, y1)
-        _draw_log(win, state, log_y, log_h - 1, width)
-        _draw_cmdbar(win, cmd_buf, err, state.speed, height, width)
+        _draw_title(win, state, width)
+        _draw_orders(win, state, ox, ow, y0, y1)
+        _draw_holding(win, state, hx, hw, y0, y1)
+        _draw_scanners(win, state, sx, sw, y0, y1)
+        _draw_log(win, state, log_y, log_h, width)
+        _draw_cmdbar(win, cmd_buf, err, height, width)
 
     win.refresh()
 
@@ -689,7 +771,6 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
 # Command parser
 # ---------------------------------------------------------------------------
 def handle_command(raw: str, state: TUIState) -> str:
-    """Parse and execute a command. Returns error string or '' on success."""
     parts = raw.strip().split()
     if not parts:
         return ""
@@ -697,29 +778,25 @@ def handle_command(raw: str, state: TUIState) -> str:
 
     if cmd in ("q", "quit", "exit"):
         return "__QUIT__"
-
     elif cmd == "trans":
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: trans <order_number>"
         return state.cmd_trans(int(parts[1]))
-
     elif cmd == "scan":
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: scan <order_number>"
         return state.cmd_scan(int(parts[1]))
-
     elif cmd == "leave":
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: leave <order_number>"
         return state.cmd_leave(int(parts[1]))
-
     elif cmd == "add":
         state.add_patient()
         return ""
-
+    elif cmd == "pause":
+        return state.cmd_pause()
     elif cmd == "clear":
         return state.cmd_clear()
-
     elif cmd == "speed":
         if len(parts) < 2:
             return "Usage: speed <factor>  e.g. 0.1 | 0.5 | 2.0"
@@ -727,7 +804,6 @@ def handle_command(raw: str, state: TUIState) -> str:
             return state.cmd_speed(float(parts[1]))
         except ValueError:
             return "Speed must be a number"
-
     else:
         return f"Unknown command: {cmd!r}"
 
@@ -749,14 +825,11 @@ def _main(stdscr, state: TUIState):
         now = time.monotonic()
         if err and now >= err_exp:
             err = ""
-
         render(stdscr, state, cmd_buf, err)
-
         try:
             key = stdscr.get_wch()
         except curses.error:
             continue
-
         if isinstance(key, str):
             if key in ("\n", "\r"):
                 result  = handle_command(cmd_buf, state)
@@ -775,25 +848,22 @@ def _main(stdscr, state: TUIState):
         elif isinstance(key, int):
             if key == curses.KEY_BACKSPACE:
                 cmd_buf = cmd_buf[:-1]
-            elif key == 27:   # ESC clears buffer
+            elif key == 27:
                 cmd_buf = ""
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 def run(num_scanners: int = 2, speed: float = DEFAULT_SPEED):
     state = TUIState(speed=speed, num_scanners=num_scanners)
-
-    # Pre-load a realistic set of starting orders
+    # Two starting orders so there's something to do while 07:00 is still quiet
     state.add_patient(3, "head")
     state.add_patient(2, "cta_chest")
-    state.add_patient(1, "trauma_full")
-    state.add_patient(3, "abdpel")
-    state.add_patient(4, "chest")
-
     try:
         curses.wrapper(lambda scr: _main(scr, state))
     finally:
         state.stop()
-
     print("CTDash TUI Test Runner exited.")
 
 
@@ -801,8 +871,8 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="CTDash TUI Test Runner")
     ap.add_argument("--scanners", type=int, default=2, choices=[1, 2, 3, 4],
-                    help="Number of scanners to use (default: 2)")
+                    help="Number of scanners (default: 2)")
     ap.add_argument("--speed", type=float, default=DEFAULT_SPEED,
-                    help=f"Time multiplier: real-secs per game-sec (default: {DEFAULT_SPEED})")
+                    help=f"Real-seconds per game-second (default: {DEFAULT_SPEED})")
     args = ap.parse_args()
     run(num_scanners=args.scanners, speed=args.speed)
