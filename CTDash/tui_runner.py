@@ -856,7 +856,7 @@ def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
     y_hlp = height - 2
     y_inp = height - 1
     _hline(win, y_sep, 0, width)
-    help_txt = "trans <n>  oral <n>  scan <n>  leave <n>  add  pause  clear  speed <f>  quit"
+    help_txt = "t/trans <n>  o/oral <n>  s/scan <n>  l/leave <n>  add  pause  clear  speed <f>  quit"
     _saddstr(win, y_hlp, 2, help_txt, curses.color_pair(CP_HEADER))
     prompt = f"> {cmd_buf}"
     if err:
@@ -911,21 +911,21 @@ def handle_command(raw: str, state: TUIState) -> str:
 
     if cmd in ("q", "quit", "exit"):
         return "__QUIT__"
-    elif cmd == "trans":
+    elif cmd in ("trans", "t"):
         if len(parts) < 2 or not parts[1].isdigit():
-            return "Usage: trans <order_number>"
+            return "Usage: t <order_number>"
         return state.cmd_trans(int(parts[1]))
-    elif cmd == "scan":
+    elif cmd in ("scan", "s"):
         if len(parts) < 2 or not parts[1].isdigit():
-            return "Usage: scan <order_number>"
+            return "Usage: s <order_number>"
         return state.cmd_scan(int(parts[1]))
-    elif cmd == "oral":
+    elif cmd in ("oral", "o"):
         if len(parts) < 2 or not parts[1].isdigit():
-            return "Usage: oral <order_number>"
+            return "Usage: o <order_number>"
         return state.cmd_oral(int(parts[1]))
-    elif cmd == "leave":
+    elif cmd in ("leave", "l"):
         if len(parts) < 2 or not parts[1].isdigit():
-            return "Usage: leave <order_number>"
+            return "Usage: l <order_number>"
         return state.cmd_leave(int(parts[1]))
     elif cmd == "add":
         state.add_patient()
