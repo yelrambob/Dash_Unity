@@ -159,6 +159,13 @@ except NameError:
 SHIFT_START_HOUR = 7    # game clock starts at 07:00
 DEFAULT_SPEED    = 0.15  # real-seconds per game-second
 
+# Transport delay mechanics
+# Each transport roll (arrival and leaving) has an independent chance of being
+# significantly longer — simulating a backed-up transporter, elevator wait, etc.
+TRANSPORT_DELAY_CHANCE        = 0.25          # 25% chance per transport request
+TRANSPORT_ARRIVAL_DELAY_MULT  = (3.0, 6.0)   # multiply normal arrival time by this
+TRANSPORT_LEAVING_DELAY_MULT  = (3.0, 8.0)   # leaving delays can be even worse
+
 
 # ---------------------------------------------------------------------------
 # Patient status constants
@@ -197,18 +204,36 @@ class TUIPatient:
         self.oral_done     = False
         self.wait_gs       = 0.0   # game-seconds waited (order placed → scan start)
 
-        self.arrival_gs    = random.randint(*ARRIVAL_RANGE)
+        # Arrival transport — 25% chance of significant delay
+        _arr = random.randint(*ARRIVAL_RANGE)
+        if random.random() < TRANSPORT_DELAY_CHANCE:
+            self.arrival_gs      = int(_arr * random.uniform(*TRANSPORT_ARRIVAL_DELAY_MULT))
+            self.arrival_delayed = True
+        else:
+            self.arrival_gs      = _arr
+            self.arrival_delayed = False
+
         self.holdwait_gs   = random.randint(*HOLDWAIT_RANGE)
-        self.leaving_gs    = random.randint(*LEAVING_RANGE)
+
+        # Leaving transport — independent 25% chance of significant delay
+        _lv = random.randint(*LEAVING_RANGE)
+        if random.random() < TRANSPORT_DELAY_CHANCE:
+            self.leaving_gs      = int(_lv * random.uniform(*TRANSPORT_LEAVING_DELAY_MULT))
+            self.leaving_delayed = True
+        else:
+            self.leaving_gs      = _lv
+            self.leaving_delayed = False
 
     def status_line(self) -> str:
         s, t = self.status, self.timer
         if s == S.WAITING:
             return "  WAITING"
         elif s == S.TRANS_ARRIVING:
-            return f"  TRANSPORT \u2014 transporter arriving  ({_fmt(t)})"
+            tag = "  \u26a0 SIGNIFICANT DELAY" if self.arrival_delayed else ""
+            return f"  TRANSPORT \u2014 transporter arriving  ({_fmt(t)}){tag}"
         elif s == S.TRANS_ENROUTE:
-            return f"  TRANSPORT \u2014 en route to bay      ({_fmt(t)})"
+            tag = "  \u26a0 DELAYED" if self.arrival_delayed else ""
+            return f"  TRANSPORT \u2014 en route to bay      ({_fmt(t)}){tag}"
         elif s == S.IN_HOLDING:
             slot = self.holding_slot + 1
             label = f"Overflow {slot - BAY_PROPER}" if self.holding_slot >= BAY_PROPER else f"Bay {slot}"
@@ -224,7 +249,8 @@ class TUIPatient:
         elif s == S.SCAN_COMPLETE:
             return f"  SCAN DONE  \u2190 type: leave {self.number}"
         elif s == S.LEAVING:
-            return f"  LEAVING  ({_fmt(t)} remaining)"
+            tag = "  \u26a0 SIGNIFICANT DELAY" if self.leaving_delayed else ""
+            return f"  LEAVING  ({_fmt(t)} remaining){tag}"
         elif s == S.DONE:
             return "  COMPLETED \u2713"
         return f"  {s}"
@@ -398,8 +424,9 @@ class TUIState:
                 return f"#{num} is not WAITING (currently: {p.status})"
             p.status = S.TRANS_ARRIVING
             p.timer  = self._gs(p.arrival_gs)
+            delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.arrival_delayed else ""
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                      f"transport initiated  (transporter arriving in {_fmt(p.timer)})")
+                      f"transport initiated  ({_fmt(p.timer)}){delay_note}")
             return ""
 
     def cmd_scan(self, num: int) -> str:
@@ -446,8 +473,9 @@ class TUIState:
                 p.holding_slot = -1
             p.status = S.LEAVING
             p.timer  = self._gs(p.leaving_gs)
+            delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leaving_delayed else ""
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                      f"leaving  ({_fmt(p.timer)} remaining)")
+                      f"leaving  ({_fmt(p.timer)} remaining){delay_note}")
             return ""
 
     def cmd_clear(self) -> str:
