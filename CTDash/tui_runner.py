@@ -141,6 +141,21 @@ EXAM_META = {
 
 ACUITY_LABEL = {1: "TRAUMA", 2: "CRITICAL", 3: "STAT", 4: "ROUTINE"}
 
+# Score constants — pulled from config/acuity_table where available
+try:
+    EXAM_BASE_SCORE = cfg.EXAM_BASE_SCORE
+    WAIT_PENALTY_PM = cfg.WAIT_PENALTY_PER_MINUTE
+except (NameError, AttributeError):
+    EXAM_BASE_SCORE = 100
+    WAIT_PENALTY_PM = 10
+
+try:
+    WAIT_THRESHOLDS = {k: v["wait_threshold"] for k, v in ACUITY_TABLE.items()}
+    PENALTY_MULTS   = {k: v["penalty_mult"]   for k, v in ACUITY_TABLE.items()}
+except NameError:
+    WAIT_THRESHOLDS = {1: 120, 2: 300, 3: 900, 4: 1800}
+    PENALTY_MULTS   = {1: 5.0, 2: 3.0, 3: 1.5, 4: 0.5}
+
 SHIFT_START_HOUR = 7    # game clock starts at 07:00
 DEFAULT_SPEED    = 0.15  # real-seconds per game-second
 
@@ -180,6 +195,7 @@ class TUIPatient:
         self.holding_slot  = -1
         self.scanner_idx   = -1
         self.oral_done     = False
+        self.wait_gs       = 0.0   # game-seconds waited (order placed → scan start)
 
         self.arrival_gs    = random.randint(*ARRIVAL_RANGE)
         self.holdwait_gs   = random.randint(*HOLDWAIT_RANGE)
@@ -212,6 +228,15 @@ class TUIPatient:
         elif s == S.DONE:
             return "  COMPLETED \u2713"
         return f"  {s}"
+
+    def calc_score(self) -> int:
+        """Score starts at EXAM_BASE_SCORE and drops once wait exceeds threshold.
+        Rate of drop is weighted by acuity — trauma loses points fastest."""
+        threshold = WAIT_THRESHOLDS.get(self.acuity, 900)
+        mult      = PENALTY_MULTS.get(self.acuity, 1.5)
+        excess_gs = max(0.0, self.wait_gs - threshold)
+        penalty   = (excess_gs / 60.0) * WAIT_PENALTY_PM * mult
+        return round(EXAM_BASE_SCORE - penalty)
 
 
 class ScannerInfo:
@@ -458,9 +483,13 @@ class TUIState:
                 self.game_elapsed_gs += dt_gs
                 self._try_spawn(dt_gs)
                 for p in self.patients:
-                    self._advance(p, dt)
+                    self._advance(p, dt, dt_gs)
 
-    def _advance(self, p: TUIPatient, dt: float):
+    def _advance(self, p: TUIPatient, dt: float, dt_gs: float):
+        # Accumulate wait time until the scan actually begins
+        if p.status not in (S.SCANNING, S.COOLDOWN, S.SCAN_COMPLETE, S.LEAVING, S.DONE):
+            p.wait_gs += dt_gs
+
         s = p.status
         if s in (S.WAITING, S.IN_HOLDING, S.SCAN_COMPLETE, S.DONE):
             return
@@ -570,6 +599,19 @@ def init_colors():
 # ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
+def _score_attr(score: int) -> int:
+    if score > 50:
+        return curses.color_pair(CP_STAT) | curses.A_BOLD      # green — healthy
+    elif score > 0:
+        return curses.color_pair(CP_CRITICAL) | curses.A_BOLD  # yellow — fading
+    else:
+        return curses.color_pair(CP_TRAUMA) | curses.A_BOLD    # red — penalty
+
+
+def _score_str(score: int) -> str:
+    return f"+{score}" if score >= 0 else str(score)
+
+
 def _hline(win, y: int, x: int, w: int, title: str = "", cp: int = CP_HEADER):
     attr = curses.color_pair(cp) | curses.A_BOLD
     _saddstr(win, y, x, "\u2500" * w, attr)
@@ -578,85 +620,129 @@ def _hline(win, y: int, x: int, w: int, title: str = "", cp: int = CP_HEADER):
 
 
 def _draw_orders(win, state: TUIState, x: int, w: int, y0: int, y1: int):
-    active  = sum(1 for p in state.patients if p.status != S.DONE)
-    waiting = sum(1 for p in state.patients if p.status == S.WAITING)
-    _hline(win, y0, x, w - 1, f"ORDERS  active:{active}  waiting:{waiting}")
+    # Orders panel shows only patients not yet in a holding bay
+    pre_bay = [p for p in state.patients
+               if p.status in (S.WAITING, S.TRANS_ARRIVING, S.TRANS_ENROUTE)]
+    in_bay  = sum(1 for p in state.patients if p.status == S.IN_HOLDING)
+    header  = f"ORDERS  queued:{len(pre_bay)}  in-bay:{in_bay}"
+    _hline(win, y0, x, w - 1, header)
     row, lim = y0 + 1, y1 - 1
 
-    shown = 0
-    for p in state.patients:
-        if row >= lim - 1:
-            remaining = len(state.patients) - shown
-            if remaining > 0:
-                _saddstr(win, row, x + 1, f"  ... +{remaining} more orders",
-                         curses.color_pair(CP_HEADER))
-            break
-        shown += 1
-        cp   = ACUITY_CP.get(p.acuity, CP_ROUTINE)
-        attr = curses.color_pair(cp) | curses.A_BOLD
-        if p.status == S.DONE:
-            attr = curses.color_pair(CP_DONE) | curses.A_DIM
-        _saddstr(win, row, x,
-                 f" #{p.number:<3} {p.patient_id}  [{ACUITY_LABEL[p.acuity]}]", attr)
+    def _draw_patient(p):
+        nonlocal row
+        if row >= lim:
+            return False
+        score = p.calc_score()
+        cp    = ACUITY_CP.get(p.acuity, CP_ROUTINE)
+        # Line 1: number, ID, acuity tag, score
+        id_part    = f" #{p.number:<3} {p.patient_id}  [{ACUITY_LABEL[p.acuity]}]"
+        score_part = f"  {_score_str(score):>5}"
+        _saddstr(win, row, x, id_part, curses.color_pair(cp) | curses.A_BOLD)
+        _saddstr(win, row, x + len(id_part), score_part, _score_attr(score))
         row += 1
         if row >= lim:
-            break
-        _saddstr(win, row, x + 5, p.exam.upper(),
-                 curses.color_pair(CP_DONE if p.status == S.DONE else CP_ROUTINE))
+            return False
+        # Line 2: exam  waited: X:XX game-time
+        waited = f"  waited: {_fmt(p.wait_gs)}"
+        _saddstr(win, row, x + 5, p.exam.upper(), curses.color_pair(CP_ROUTINE))
+        _saddstr(win, row, x + 5 + len(p.exam) + 2, waited,
+                 curses.color_pair(CP_HEADER))
         row += 1
         if row >= lim:
-            break
+            return False
+        # Line 3: status
         s_attr = curses.color_pair(STATUS_CP.get(p.status, CP_ROUTINE))
-        if p.status == S.DONE:
-            s_attr = curses.color_pair(CP_DONE) | curses.A_DIM
-        elif p.status == S.SCAN_COMPLETE:
-            s_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
         _saddstr(win, row, x, p.status_line(), s_attr)
-        row += 2   # +1 blank gap
+        row += 2
+        return True
+
+    # --- Group 1: TRAUMA + CRITICAL (time-ordered, most urgent first) ---
+    urgent = sorted([p for p in pre_bay if p.acuity in (1, 2)], key=lambda p: p.number)
+    if urgent:
+        _saddstr(win, row, x + 1, "\u2500\u2500 TRAUMA / CRITICAL \u2500\u2500",
+                 curses.color_pair(CP_TRAUMA) | curses.A_BOLD)
+        row += 1
+        for p in urgent:
+            if not _draw_patient(p):
+                break
+
+    # --- Group 2: STAT ---
+    stats = sorted([p for p in pre_bay if p.acuity == 3], key=lambda p: p.number)
+    if stats and row < lim:
+        _saddstr(win, row, x + 1, "\u2500\u2500 STAT \u2500\u2500",
+                 curses.color_pair(CP_STAT) | curses.A_BOLD)
+        row += 1
+        for p in stats:
+            if not _draw_patient(p):
+                break
+
+    # --- Group 3: ROUTINE ---
+    routine = sorted([p for p in pre_bay if p.acuity == 4], key=lambda p: p.number)
+    if routine and row < lim:
+        _saddstr(win, row, x + 1, "\u2500\u2500 ROUTINE \u2500\u2500",
+                 curses.color_pair(CP_ROUTINE) | curses.A_BOLD)
+        row += 1
+        for p in routine:
+            if not _draw_patient(p):
+                break
 
 
 def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
     _hline(win, y0, x, w - 1, "HOLDING BAYS")
     row, lim = y0 + 1, y1 - 1
 
+    def _draw_slot(label: str, occ, overflow: bool = False):
+        nonlocal row
+        if row >= lim:
+            return
+        if occ is None:
+            dim = curses.color_pair(CP_WARN if overflow else CP_DONE) | curses.A_DIM
+            _saddstr(win, row, x + 1, f"  {label}: (empty)", dim)
+            row += 1
+        else:
+            p = state._get(occ)
+            if not p:
+                row += 1
+                return
+            score = p.calc_score()
+            cp    = ACUITY_CP.get(p.acuity, CP_ROUTINE)
+            ovr_tag = "  \u26a0 OVERFLOW" if overflow else ""
+            # Line 1: slot label, patient ID, acuity, score
+            _saddstr(win, row, x + 1,
+                     f"  {label}: #{p.number} [{ACUITY_LABEL[p.acuity]}]{ovr_tag}",
+                     curses.color_pair(CP_WARN if overflow else cp) | curses.A_BOLD)
+            _saddstr(win, row, x + w - 9, f"{_score_str(score):>6}", _score_attr(score))
+            row += 1
+            if row >= lim:
+                return
+            # Line 2: exam + wait time + scan hint
+            waited = f"waited {_fmt(p.wait_gs)}"
+            hint   = f"scan {p.number}"
+            _saddstr(win, row, x + 4, p.exam.upper(), curses.color_pair(cp))
+            _saddstr(win, row, x + 4 + len(p.exam) + 2, waited,
+                     curses.color_pair(CP_HEADER))
+            _saddstr(win, row, x + w - len(hint) - 3, hint,
+                     curses.color_pair(CP_CMD) | curses.A_BOLD)
+            row += 1
+            # Line 3: status (oral contrast, injector, scanning, etc.)
+            if p.status != S.IN_HOLDING:
+                s_attr = curses.color_pair(STATUS_CP.get(p.status, CP_ROUTINE))
+                _saddstr(win, row, x + 4, p.status_line().strip(), s_attr)
+                row += 1
+            row += 1   # gap
+
     _saddstr(win, row, x + 1, f"\u2500\u2500 Proper ({BAY_PROPER} slots) \u2500\u2500",
              curses.color_pair(CP_HEADER))
     row += 1
     for i in range(BAY_PROPER):
-        if row >= lim:
-            break
-        occ = state.holding[i]
-        if occ is None:
-            _saddstr(win, row, x + 1, f"  Slot {i+1}: (empty)",
-                     curses.color_pair(CP_DONE) | curses.A_DIM)
-        else:
-            p = state._get(occ)
-            if p:
-                cp = ACUITY_CP.get(p.acuity, CP_ROUTINE)
-                _saddstr(win, row, x + 1, f"  Slot {i+1}: #{occ} {p.exam.upper()}",
-                         curses.color_pair(cp) | curses.A_BOLD)
-        row += 1
+        _draw_slot(f"Bay {i+1}", state.holding[i], overflow=False)
 
     if row < lim:
-        row += 1
         _saddstr(win, row, x + 1, f"\u2500\u2500 Overflow ({BAY_OVERFLOW} slots) \u2500\u2500",
                  curses.color_pair(CP_WARN))
         row += 1
     for i in range(BAY_OVERFLOW):
-        si = BAY_PROPER + i
-        if row >= lim:
-            break
-        occ = state.holding[si]
-        if occ is None:
-            _saddstr(win, row, x + 1, f"  OVR {i+1}: (empty)",
-                     curses.color_pair(CP_DONE) | curses.A_DIM)
-        else:
-            p = state._get(occ)
-            if p:
-                _saddstr(win, row, x + 1,
-                         f"  OVR {i+1}: #{occ} {p.exam.upper()} \u26a0 PENALTY",
-                         curses.color_pair(CP_WARN) | curses.A_BOLD)
-        row += 1
+        _draw_slot(f"OVR {i+1}", state.holding[BAY_PROPER + i], overflow=True)
 
 
 def _draw_scanners(win, state: TUIState, x: int, w: int, y0: int, y1: int):
