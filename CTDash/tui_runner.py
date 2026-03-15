@@ -439,11 +439,7 @@ class TUIState:
             if p.status != S.IN_HOLDING:
                 return f"#{num} must be IN_HOLDING to scan (currently: {p.status})"
             if p.oral_contrast and not p.oral_done:
-                p.status = S.ORAL_CONTRAST
-                p.timer  = self._gs(ORAL_GS)
-                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                          f"oral contrast started  ({_fmt(p.timer)} wait)")
-                return ""
+                return f"#{num} needs oral contrast first — type: oral {num}"
             idx = self._free_scanner()
             if idx == -1:
                 return "No scanner available right now"
@@ -461,6 +457,23 @@ class TUIState:
                 p.timer  = self._gs(p.scan_gs)
                 self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
                           f"scanning on Scanner {idx+1}  ({_fmt(p.timer)} remaining)")
+            return ""
+
+    def cmd_oral(self, num: int) -> str:
+        with self.lock:
+            p = self._get(num)
+            if p is None:
+                return f"No order #{num}"
+            if p.status != S.IN_HOLDING:
+                return f"#{num} must be IN_HOLDING to start oral contrast (currently: {p.status})"
+            if not p.oral_contrast:
+                return f"#{num} {p.exam.upper()} does not require oral contrast"
+            if p.oral_done:
+                return f"#{num} oral contrast already complete — type: scan {num}"
+            p.status = S.ORAL_CONTRAST
+            p.timer  = self._gs(ORAL_GS)
+            self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                      f"oral contrast started  ({_fmt(p.timer)} wait)")
             return ""
 
     def cmd_leave(self, num: int) -> str:
@@ -747,7 +760,8 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
                 return
             # Line 2: exam + wait time + scan hint
             waited = f"waited {_fmt(p.wait_gs)}"
-            hint   = f"scan {p.number}"
+            needs_oral = p.oral_contrast and not p.oral_done and p.status == S.IN_HOLDING
+            hint   = f"oral {p.number}" if needs_oral else f"scan {p.number}"
             _saddstr(win, row, x + 4, p.exam.upper(), curses.color_pair(cp))
             _saddstr(win, row, x + 4 + len(p.exam) + 2, waited,
                      curses.color_pair(CP_HEADER))
@@ -842,7 +856,7 @@ def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
     y_hlp = height - 2
     y_inp = height - 1
     _hline(win, y_sep, 0, width)
-    help_txt = "trans <n>  scan <n>  leave <n>  add  pause  clear  speed <f>  quit"
+    help_txt = "trans <n>  oral <n>  scan <n>  leave <n>  add  pause  clear  speed <f>  quit"
     _saddstr(win, y_hlp, 2, help_txt, curses.color_pair(CP_HEADER))
     prompt = f"> {cmd_buf}"
     if err:
@@ -905,6 +919,10 @@ def handle_command(raw: str, state: TUIState) -> str:
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: scan <order_number>"
         return state.cmd_scan(int(parts[1]))
+    elif cmd == "oral":
+        if len(parts) < 2 or not parts[1].isdigit():
+            return "Usage: oral <order_number>"
+        return state.cmd_oral(int(parts[1]))
     elif cmd == "leave":
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: leave <order_number>"
