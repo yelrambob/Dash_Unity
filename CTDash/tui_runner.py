@@ -150,11 +150,13 @@ except (NameError, AttributeError):
     WAIT_PENALTY_PM = 10
 
 try:
-    WAIT_THRESHOLDS = {k: v["wait_threshold"] for k, v in ACUITY_TABLE.items()}
-    PENALTY_MULTS   = {k: v["penalty_mult"]   for k, v in ACUITY_TABLE.items()}
+    PENALTY_MULTS = {k: v["penalty_mult"] for k, v in ACUITY_TABLE.items()}
 except NameError:
-    WAIT_THRESHOLDS = {1: 120, 2: 300, 3: 900, 4: 1800}
-    PENALTY_MULTS   = {1: 5.0, 2: 3.0, 3: 1.5, 4: 0.5}
+    PENALTY_MULTS = {1: 5.0, 2: 3.0, 3: 1.5, 4: 0.5}
+
+# All tiers begin losing points at 1:30 game-time (90 gs).
+# Differentiation comes from penalty rate — trauma craters fast, routine barely moves.
+WAIT_THRESHOLDS = {1: 90, 2: 90, 3: 90, 4: 90}
 
 SHIFT_START_HOUR = 7    # game clock starts at 07:00
 DEFAULT_SPEED    = 0.15  # real-seconds per game-second
