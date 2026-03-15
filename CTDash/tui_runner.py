@@ -904,6 +904,9 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
 # Command parser
 # ---------------------------------------------------------------------------
 def handle_command(raw: str, state: TUIState) -> str:
+    import re
+    # Allow spaceless shortcuts: s1 → ["s", "1"],  t12 → ["t", "12"]
+    raw = re.sub(r'^([a-zA-Z]+)(\d+)$', r'\1 \2', raw.strip())
     parts = raw.strip().split()
     if not parts:
         return ""
