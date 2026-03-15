@@ -289,9 +289,13 @@ class TUIState:
         minute   = (total_gs % 3600) // 60
         return f"{hour:02d}:{minute:02d}"
 
-    def exams_per_hour(self) -> int:
-        row = HOURLY_SPAWN_TABLE.get(self._current_game_hour(), {"exams_per_hour": 4})
-        return row["exams_per_hour"]
+    def exams_per_hour(self) -> float:
+        """Interpolated rate between current and next hour for smooth display."""
+        hour     = self._current_game_hour()
+        fraction = (self.game_elapsed_gs % 3600) / 3600
+        cur_rate = HOURLY_SPAWN_TABLE.get(hour,     {"exams_per_hour": 4})["exams_per_hour"]
+        nxt_rate = HOURLY_SPAWN_TABLE.get(hour + 1, {"exams_per_hour": 4})["exams_per_hour"]
+        return cur_rate + (nxt_rate - cur_rate) * fraction
 
     # ------------------------------------------------------------------
     # Internal helpers (call under lock)
@@ -347,8 +351,7 @@ class TUIState:
     def _try_spawn(self, dt_gs: float):
         if not self.auto_spawn:
             return
-        row = HOURLY_SPAWN_TABLE.get(self._current_game_hour(), {"exams_per_hour": 4})
-        prob_per_gs = row["exams_per_hour"] / 3600.0
+        prob_per_gs = self.exams_per_hour() / 3600.0   # interpolated, smooth ramp
         self._spawn_accum += prob_per_gs * dt_gs
         # Spawn once per accumulator tick (one at a time, avoids bursts)
         if self._spawn_accum >= 1.0:
@@ -712,7 +715,7 @@ def _draw_title(win, state: TUIState, width: int):
     rate     = state.exams_per_hour()
     paused   = "  \u23f8 SPAWNING PAUSED" if not state.auto_spawn else ""
     left     = f"  CTDash TUI Test Runner"
-    right    = f"[\u23f0 {clock}]  [{rate}/hr]{paused}  speed:{state.speed:.2f}x  "
+    right    = f"[\u23f0 {clock}]  [{rate:.1f}/hr]{paused}  speed:{state.speed:.2f}x  "
     _saddstr(win, 0, 0, left,  curses.color_pair(CP_TITLE) | curses.A_BOLD)
     _saddstr(win, 0, max(0, width - len(right) - 1), right,
              curses.color_pair(CP_TITLE) | curses.A_BOLD)
