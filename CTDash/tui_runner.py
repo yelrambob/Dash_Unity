@@ -214,6 +214,8 @@ class TUIPatient:
         self.holding_slot  = -1
         self.scanner_idx   = -1
         self.oral_done         = False
+        self.oral_started      = False  # True once oral N has been called
+        self.oral_bg_remaining = 0.0    # real-seconds left for pre-bay oral timer
         self.oral_timer_total  = 0.0   # real-seconds set when oral contrast starts
         self.wait_gs           = 0.0   # game-seconds waited (order placed → scan start)
         self.to_scanner_gs     = random.randint(*BAY_TO_SCANNER_RANGE)
@@ -250,13 +252,25 @@ class TUIPatient:
     def status_line(self) -> str:
         s, t = self.status, self.timer
         if s == S.WAITING:
+            if self.oral_started and not self.oral_done and self.oral_bg_remaining > 0:
+                pct = max(0.0, 1.0 - self.oral_bg_remaining / self.oral_timer_total) * 100
+                return (f"  WAITING  \u2014 oral contrast {pct:.0f}%  "
+                        f"({_fmt(self.oral_bg_remaining)} remaining)")
             return "  WAITING"
         elif s == S.TRANS_ARRIVING:
             tag = "  \u26a0 SIGNIFICANT DELAY" if self.arrival_delayed else ""
-            return f"  TRANSPORT \u2014 transporter arriving  ({_fmt(t)}){tag}"
+            oral = ""
+            if self.oral_started and not self.oral_done and self.oral_bg_remaining > 0:
+                pct = max(0.0, 1.0 - self.oral_bg_remaining / self.oral_timer_total) * 100
+                oral = f"  oral {pct:.0f}%"
+            return f"  TRANSPORT \u2014 transporter arriving  ({_fmt(t)}){oral}{tag}"
         elif s == S.TRANS_ENROUTE:
             tag = "  \u26a0 DELAYED" if self.arrival_delayed else ""
-            return f"  TRANSPORT \u2014 en route to bay      ({_fmt(t)}){tag}"
+            oral = ""
+            if self.oral_started and not self.oral_done and self.oral_bg_remaining > 0:
+                pct = max(0.0, 1.0 - self.oral_bg_remaining / self.oral_timer_total) * 100
+                oral = f"  oral {pct:.0f}%"
+            return f"  TRANSPORT \u2014 en route to bay      ({_fmt(t)}){oral}{tag}"
         elif s == S.IN_HOLDING:
             slot = self.holding_slot + 1
             label = f"Overflow {slot - BAY_PROPER}" if self.holding_slot >= BAY_PROPER else f"Bay {slot}"
@@ -487,17 +501,27 @@ class TUIState:
             p = self._get(num)
             if p is None:
                 return f"No order #{num}"
-            if p.status != S.IN_HOLDING:
-                return f"#{num} must be IN_HOLDING to start oral contrast (currently: {p.status})"
             if not p.oral_contrast:
                 return f"#{num} {p.exam.upper()} does not require oral contrast"
             if p.oral_done:
                 return f"#{num} oral contrast already complete — type: scan {num}"
-            p.status           = S.ORAL_CONTRAST
-            p.timer            = self._gs(ORAL_GS)
-            p.oral_timer_total = p.timer
+            if p.oral_started:
+                return f"#{num} oral contrast already in progress"
+            pre_bay = (S.WAITING, S.TRANS_ARRIVING, S.TRANS_ENROUTE)
+            if p.status not in pre_bay and p.status != S.IN_HOLDING:
+                return f"#{num} cannot start oral contrast (currently: {p.status})"
+            gs = self._gs(ORAL_GS)
+            p.oral_started     = True
+            p.oral_timer_total = gs
+            if p.status == S.IN_HOLDING:
+                # Patient is in the bay — run as ORAL_CONTRAST status (existing flow)
+                p.status = S.ORAL_CONTRAST
+                p.timer  = gs
+            else:
+                # Pre-bay — run as background timer, status unchanged
+                p.oral_bg_remaining = gs
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                      f"oral contrast started  ({_fmt(p.timer)} wait)")
+                      f"oral contrast started  ({_fmt(gs)} wait)")
             return ""
 
     def cmd_leave(self, num: int) -> str:
@@ -507,9 +531,7 @@ class TUIState:
                 return f"No order #{num}"
             if p.status != S.SCAN_COMPLETE:
                 return f"#{num} must be SCAN_COMPLETE (currently: {p.status})"
-            if p.holding_slot >= 0:
-                self.holding[p.holding_slot] = None
-                p.holding_slot = -1
+            # Bay slot is intentionally kept — it blocks until patient physically departs
             p.status = S.TRANS_LEAVING
             p.timer  = self._gs(p.leave_arriving_gs)
             delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leave_arriving_delayed else ""
@@ -532,8 +554,10 @@ class TUIState:
             if p.scanner_idx >= 0:
                 self.scanners[p.scanner_idx].patient_num = None
                 p.scanner_idx = -1
-            p.oral_done        = False
-            p.oral_timer_total = 0.0
+            p.oral_done         = False
+            p.oral_started      = False
+            p.oral_bg_remaining = 0.0
+            p.oral_timer_total  = 0.0
             p.status           = S.WAITING
             p.timer            = 0.0
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 recalled to orders list")
@@ -575,8 +599,18 @@ class TUIState:
                     self._advance(p, dt, dt_gs)
 
     def _advance(self, p: TUIPatient, dt: float, dt_gs: float):
+        # Background oral timer (pre-bay oral contrast, runs parallel to transport)
+        if p.oral_started and not p.oral_done and p.oral_bg_remaining > 0:
+            p.oral_bg_remaining = max(0.0, p.oral_bg_remaining - dt)
+            if p.oral_bg_remaining <= p.oral_timer_total * 0.20:
+                p.oral_done = True
+                p.oral_bg_remaining = 0.0
+                self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                          f"oral contrast 80% \u2014 ready to scan")
+
         # Accumulate wait time until the scan actually begins
-        if p.status not in (S.SCANNING, S.COOLDOWN, S.SCAN_COMPLETE, S.LEAVING, S.DONE):
+        if p.status not in (S.SCANNING, S.COOLDOWN, S.SCAN_COMPLETE,
+                            S.TRANS_LEAVING, S.LEAVING, S.DONE):
             p.wait_gs += dt_gs
 
         s = p.status
@@ -599,7 +633,13 @@ class TUIState:
                 p.holding_slot = slot
                 label = (f"Overflow {slot - BAY_PROPER + 1}"
                          if slot >= BAY_PROPER else f"Bay {slot + 1}")
-                p.status = S.IN_HOLDING
+                if p.oral_started and not p.oral_done and p.oral_bg_remaining > 0:
+                    # Oral still running — switch to ORAL_CONTRAST status in bay
+                    p.status = S.ORAL_CONTRAST
+                    p.timer  = p.oral_bg_remaining
+                    p.oral_bg_remaining = 0.0
+                else:
+                    p.status = S.IN_HOLDING
                 self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
                           f"arrived in {label}")
 
@@ -650,6 +690,9 @@ class TUIState:
                       f"transporter arrived, departing  ({_fmt(p.timer)}){delay_note}")
 
         elif s == S.LEAVING and p.timer <= 0:
+            if p.holding_slot >= 0:
+                self.holding[p.holding_slot] = None
+                p.holding_slot = -1
             p.status = S.DONE
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
                       f"departed, exam complete \u2713")
@@ -797,17 +840,6 @@ def _draw_orders(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             if not _draw_patient(p):
                 break
 
-    # --- Group 4: DEPARTING (TRANS_LEAVING / LEAVING) ---
-    departing = sorted([p for p in state.patients
-                        if p.status in (S.TRANS_LEAVING, S.LEAVING)],
-                       key=lambda p: p.number)
-    if departing and row < lim:
-        _saddstr(win, row, x + 1, "\u2500\u2500 DEPARTING \u2500\u2500",
-                 curses.color_pair(CP_TRANS) | curses.A_BOLD)
-        row += 1
-        for p in departing:
-            if not _draw_patient(p):
-                break
 
 
 def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
@@ -840,7 +872,7 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
                 return
             # Line 2: exam + wait time + hint
             waited = f"waited {_fmt(p.wait_gs)}"
-            needs_oral_start = p.oral_contrast and not p.oral_done and p.status == S.IN_HOLDING
+            needs_oral_start = p.oral_contrast and not p.oral_started and p.status == S.IN_HOLDING
             if needs_oral_start:
                 hint      = f"oral {p.number}"
                 hint_attr = curses.color_pair(CP_WARN) | curses.A_BOLD
@@ -850,6 +882,9 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             elif p.status == S.SCAN_COMPLETE:
                 hint      = f"leave {p.number}"
                 hint_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
+            elif p.status in (S.TRANS_LEAVING, S.LEAVING):
+                hint      = "departing"
+                hint_attr = curses.color_pair(CP_TRANS) | curses.A_DIM
             else:
                 hint      = ""
                 hint_attr = 0
