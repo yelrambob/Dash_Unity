@@ -11,8 +11,10 @@ Layout:
 
 Commands:
   trans <n>    Initiate transport for order #n        (status must be WAITING)
-  scan <n>     Assign order #n to a scanner           (status must be IN_HOLDING)
+  oral <n>     Start oral contrast for order #n       (status must be IN_HOLDING, exam requires oral)
+  scan <n>     Assign order #n to a scanner           (status must be IN_HOLDING, oral ≥80% if required)
   leave <n>    Start leaving transport for order #n   (status must be SCAN_COMPLETE)
+  recall <n>   Return order #n to WAITING             (cancels transport or holding; rc <n> shorthand)
   add          Manually spawn a random patient
   pause        Toggle auto-spawning on/off
   speed <f>    Set time multiplier (default 0.15: 1 game-sec = 0.15 real-sec)
@@ -203,8 +205,9 @@ class TUIPatient:
         self.timer         = 0.0
         self.holding_slot  = -1
         self.scanner_idx   = -1
-        self.oral_done     = False
-        self.wait_gs       = 0.0   # game-seconds waited (order placed → scan start)
+        self.oral_done         = False
+        self.oral_timer_total  = 0.0   # real-seconds set when oral contrast starts
+        self.wait_gs           = 0.0   # game-seconds waited (order placed → scan start)
 
         # Arrival transport — 25% chance of significant delay
         _arr = random.randint(*ARRIVAL_RANGE)
@@ -241,6 +244,10 @@ class TUIPatient:
             label = f"Overflow {slot - BAY_PROPER}" if self.holding_slot >= BAY_PROPER else f"Bay {slot}"
             return f"  IN HOLDING [{label}]"
         elif s == S.ORAL_CONTRAST:
+            if self.oral_timer_total > 0:
+                pct = max(0.0, 1.0 - self.timer / self.oral_timer_total) * 100
+                unlock = "  \u2713 scan unlocked" if pct >= 80 else f"  (scan unlocks at 80%)"
+                return f"  ORAL CONTRAST  {pct:.0f}%  ({_fmt(t)} remaining){unlock}"
             return f"  ORAL CONTRAST  ({_fmt(t)} remaining)"
         elif s == S.INJECTOR:
             return f"  INJECTOR FILL  ({_fmt(t)} remaining)"
@@ -470,8 +477,9 @@ class TUIState:
                 return f"#{num} {p.exam.upper()} does not require oral contrast"
             if p.oral_done:
                 return f"#{num} oral contrast already complete — type: scan {num}"
-            p.status = S.ORAL_CONTRAST
-            p.timer  = self._gs(ORAL_GS)
+            p.status           = S.ORAL_CONTRAST
+            p.timer            = self._gs(ORAL_GS)
+            p.oral_timer_total = p.timer
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
                       f"oral contrast started  ({_fmt(p.timer)} wait)")
             return ""
@@ -491,6 +499,24 @@ class TUIState:
             delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leaving_delayed else ""
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
                       f"leaving  ({_fmt(p.timer)} remaining){delay_note}")
+            return ""
+
+    def cmd_recall(self, num: int) -> str:
+        with self.lock:
+            p = self._get(num)
+            if p is None:
+                return f"No order #{num}"
+            recallable = (S.TRANS_ARRIVING, S.TRANS_ENROUTE, S.IN_HOLDING, S.ORAL_CONTRAST)
+            if p.status not in recallable:
+                return f"#{num} cannot be recalled (status: {p.status})"
+            if p.holding_slot >= 0:
+                self.holding[p.holding_slot] = None
+                p.holding_slot = -1
+            p.oral_done        = False
+            p.oral_timer_total = 0.0
+            p.status           = S.WAITING
+            p.timer            = 0.0
+            self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 recalled to orders list")
             return ""
 
     def cmd_clear(self) -> str:
@@ -557,11 +583,11 @@ class TUIState:
                 self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
                           f"arrived in {label}")
 
-        elif s == S.ORAL_CONTRAST and p.timer <= 0:
+        elif s == S.ORAL_CONTRAST and p.timer <= p.oral_timer_total * 0.20:
             p.oral_done = True
             p.status    = S.IN_HOLDING
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
-                      f"oral contrast complete, ready to scan")
+                      f"oral contrast 80% \u2014 ready to scan")
 
         elif s == S.INJECTOR and p.timer <= 0:
             p.status = S.SCANNING
@@ -758,18 +784,30 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             row += 1
             if row >= lim:
                 return
-            # Line 2: exam + wait time + scan hint
+            # Line 2: exam + wait time + hint
             waited = f"waited {_fmt(p.wait_gs)}"
-            needs_oral = p.oral_contrast and not p.oral_done and p.status == S.IN_HOLDING
-            hint   = f"oral {p.number}" if needs_oral else f"scan {p.number}"
+            needs_oral_start = p.oral_contrast and not p.oral_done and p.status == S.IN_HOLDING
+            if needs_oral_start:
+                hint      = f"oral {p.number}"
+                hint_attr = curses.color_pair(CP_WARN) | curses.A_BOLD
+            elif p.status == S.IN_HOLDING:
+                hint      = f"scan {p.number}"
+                hint_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
+            else:
+                hint      = ""
+                hint_attr = 0
             _saddstr(win, row, x + 4, p.exam.upper(), curses.color_pair(cp))
             _saddstr(win, row, x + 4 + len(p.exam) + 2, waited,
                      curses.color_pair(CP_HEADER))
-            _saddstr(win, row, x + w - len(hint) - 3, hint,
-                     curses.color_pair(CP_CMD) | curses.A_BOLD)
+            if hint:
+                _saddstr(win, row, x + w - len(hint) - 3, hint, hint_attr)
             row += 1
-            # Line 3: status (oral contrast, injector, scanning, etc.)
-            if p.status != S.IN_HOLDING:
+            # Line 3: oral warning banner or status line
+            if needs_oral_start and row < lim:
+                _saddstr(win, row, x + 2, "\u26a0  ORAL CONTRAST NEEDED  \u2014  give before scan",
+                         curses.color_pair(CP_WARN) | curses.A_BOLD)
+                row += 1
+            elif p.status != S.IN_HOLDING and row < lim:
                 s_attr = curses.color_pair(STATUS_CP.get(p.status, CP_ROUTINE))
                 _saddstr(win, row, x + 4, p.status_line().strip(), s_attr)
                 row += 1
@@ -856,7 +894,7 @@ def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
     y_hlp = height - 2
     y_inp = height - 1
     _hline(win, y_sep, 0, width)
-    help_txt = "t/trans <n>  o/oral <n>  s/scan <n>  l/leave <n>  add  pause  clear  speed <f>  quit"
+    help_txt = "t/trans <n>  o/oral <n>  s/scan <n>  l/leave <n>  rc/recall <n>  add  pause  clear  speed <f>  quit"
     _saddstr(win, y_hlp, 2, help_txt, curses.color_pair(CP_HEADER))
     prompt = f"> {cmd_buf}"
     if err:
@@ -930,6 +968,10 @@ def handle_command(raw: str, state: TUIState) -> str:
         if len(parts) < 2 or not parts[1].isdigit():
             return "Usage: l <order_number>"
         return state.cmd_leave(int(parts[1]))
+    elif cmd in ("recall", "rc"):
+        if len(parts) < 2 or not parts[1].isdigit():
+            return "Usage: recall <order_number>"
+        return state.cmd_recall(int(parts[1]))
     elif cmd == "add":
         state.add_patient()
         return ""
