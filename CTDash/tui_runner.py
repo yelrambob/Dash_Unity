@@ -35,7 +35,8 @@ Timing (at default speed 0.15):
   Trauma scan:           70 gs  →  10.5 real seconds
   Post-scan cooldown:    20 gs  →  3.0 real seconds
   Oral contrast wait:   180 gs  →  27.0 real seconds  (scan unlocks at 80%)
-  Leaving transport:   5-20 gs  →  0.75-3.0 real seconds
+  Leave: transporter arriving: 15-45 gs  →  2.25-6.75 real seconds  (25% chance of 3-8× delay)
+  Leave: en route to elevator:  5-20 gs  →  0.75-3.0 real seconds   (25% chance of 3-8× delay)
 
   One game-hour passes every 9 real minutes at speed 0.15.
   (3600 gs × 0.15 real-sec/gs = 540 real seconds = 9 min)
@@ -71,6 +72,7 @@ try:
     BAY_PROPER            = cfg.HOLDING_PROPER_SLOTS
     BAY_OVERFLOW          = cfg.HOLDING_OVERFLOW_SLOTS
     BAY_TO_SCANNER_RANGE  = getattr(cfg, "BAY_TO_SCANNER_DELAY", (10, 30))
+    LEAVE_ARRIVING_RANGE  = getattr(cfg, "TRANSPORT_LEAVE_ARRIVING", (15, 45))
 except ImportError:
     SCAN_TIMES            = {"head": 20, "chest": 25, "spine": 30, "abdpel": 50,
                              "trauma_full": 70, "cta_head": 45, "cta_chest": 35, "extremity": 35}
@@ -79,6 +81,7 @@ except ImportError:
     HOLDWAIT_RANGE        = (5, 30)
     LEAVING_RANGE         = (5, 20)
     BAY_TO_SCANNER_RANGE  = (10, 30)
+    LEAVE_ARRIVING_RANGE  = (15, 45)
     ORAL_GS        = 180
     INJECTOR_GS    = 20
     BAY_PROPER     = 4
@@ -187,9 +190,10 @@ class S:
     INJECTOR       = "INJECTOR"
     SCANNING       = "SCANNING"
     COOLDOWN       = "COOLDOWN"
-    SCAN_COMPLETE  = "SCAN_COMPLETE"
-    LEAVING        = "LEAVING"
-    DONE           = "DONE"
+    SCAN_COMPLETE   = "SCAN_COMPLETE"
+    TRANS_LEAVING   = "TRANS_LEAVING"
+    LEAVING         = "LEAVING"
+    DONE            = "DONE"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +229,16 @@ class TUIPatient:
 
         self.holdwait_gs   = random.randint(*HOLDWAIT_RANGE)
 
-        # Leaving transport — independent 25% chance of significant delay
+        # Leaving phase 1: transporter arriving to collect patient — 25% delay chance
+        _la = random.randint(*LEAVE_ARRIVING_RANGE)
+        if random.random() < TRANSPORT_DELAY_CHANCE:
+            self.leave_arriving_gs      = int(_la * random.uniform(*TRANSPORT_LEAVING_DELAY_MULT))
+            self.leave_arriving_delayed = True
+        else:
+            self.leave_arriving_gs      = _la
+            self.leave_arriving_delayed = False
+
+        # Leaving phase 2: patient being wheeled out — independent 25% delay chance
         _lv = random.randint(*LEAVING_RANGE)
         if random.random() < TRANSPORT_DELAY_CHANCE:
             self.leaving_gs      = int(_lv * random.uniform(*TRANSPORT_LEAVING_DELAY_MULT))
@@ -264,9 +277,12 @@ class TUIPatient:
             return f"  COOLDOWN [Scanner {self.scanner_idx + 1}]  ({_fmt(t)} remaining)"
         elif s == S.SCAN_COMPLETE:
             return f"  SCAN DONE  \u2190 type: leave {self.number}"
+        elif s == S.TRANS_LEAVING:
+            tag = "  \u26a0 SIGNIFICANT DELAY" if self.leave_arriving_delayed else ""
+            return f"  TRANSPORT \u2014 transporter coming  ({_fmt(t)}){tag}"
         elif s == S.LEAVING:
             tag = "  \u26a0 SIGNIFICANT DELAY" if self.leaving_delayed else ""
-            return f"  LEAVING  ({_fmt(t)} remaining){tag}"
+            return f"  TRANSPORT \u2014 en route to elevator  ({_fmt(t)}){tag}"
         elif s == S.DONE:
             return "  COMPLETED \u2713"
         return f"  {s}"
@@ -460,10 +476,6 @@ class TUIState:
             sc = self.scanners[idx]
             sc.patient_num = num
             p.scanner_idx  = idx
-            # Free the holding bay slot — patient is leaving
-            if p.holding_slot >= 0:
-                self.holding[p.holding_slot] = None
-                p.holding_slot = -1
             p.status = S.TO_SCANNER
             p.timer  = self._gs(p.to_scanner_gs)
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
@@ -498,11 +510,11 @@ class TUIState:
             if p.holding_slot >= 0:
                 self.holding[p.holding_slot] = None
                 p.holding_slot = -1
-            p.status = S.LEAVING
-            p.timer  = self._gs(p.leaving_gs)
-            delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leaving_delayed else ""
+            p.status = S.TRANS_LEAVING
+            p.timer  = self._gs(p.leave_arriving_gs)
+            delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leave_arriving_delayed else ""
             self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                      f"leaving  ({_fmt(p.timer)} remaining){delay_note}")
+                      f"transport called  ({_fmt(p.timer)} until pickup){delay_note}")
             return ""
 
     def cmd_recall(self, num: int) -> str:
@@ -630,6 +642,13 @@ class TUIState:
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
                       f"SCAN COMPLETE  \u2190 type: leave {p.number}")
 
+        elif s == S.TRANS_LEAVING and p.timer <= 0:
+            p.status = S.LEAVING
+            p.timer  = self._gs(p.leaving_gs)
+            delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.leaving_delayed else ""
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                      f"transporter arrived, departing  ({_fmt(p.timer)}){delay_note}")
+
         elif s == S.LEAVING and p.timer <= 0:
             p.status = S.DONE
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
@@ -666,6 +685,7 @@ STATUS_CP  = {
     S.SCANNING:       CP_SCANNER,
     S.COOLDOWN:       CP_SCANNER,
     S.SCAN_COMPLETE:  CP_CMD,
+    S.TRANS_LEAVING:  CP_TRANS,
     S.LEAVING:        CP_TRANS,
     S.DONE:           CP_DONE,
 }
@@ -777,6 +797,18 @@ def _draw_orders(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             if not _draw_patient(p):
                 break
 
+    # --- Group 4: DEPARTING (TRANS_LEAVING / LEAVING) ---
+    departing = sorted([p for p in state.patients
+                        if p.status in (S.TRANS_LEAVING, S.LEAVING)],
+                       key=lambda p: p.number)
+    if departing and row < lim:
+        _saddstr(win, row, x + 1, "\u2500\u2500 DEPARTING \u2500\u2500",
+                 curses.color_pair(CP_TRANS) | curses.A_BOLD)
+        row += 1
+        for p in departing:
+            if not _draw_patient(p):
+                break
+
 
 def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
     _hline(win, y0, x, w - 1, "HOLDING BAYS")
@@ -814,6 +846,9 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
                 hint_attr = curses.color_pair(CP_WARN) | curses.A_BOLD
             elif p.status == S.IN_HOLDING:
                 hint      = f"scan {p.number}"
+                hint_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
+            elif p.status == S.SCAN_COMPLETE:
+                hint      = f"leave {p.number}"
                 hint_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
             else:
                 hint      = ""
