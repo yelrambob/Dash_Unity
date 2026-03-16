@@ -997,9 +997,13 @@ def _main(stdscr, state: TUIState):
 # ---------------------------------------------------------------------------
 def run(num_scanners: int = 2, speed: float = DEFAULT_SPEED):
     state = TUIState(speed=speed, num_scanners=num_scanners)
-    # Two starting orders so there's something to do while 07:00 is still quiet
-    state.add_patient(3, "head")
-    state.add_patient(2, "cta_chest")
+    # Seed the queue with a spread of cases so there's work to do right away
+    state.add_patient(1, "trauma_full")   # TRAUMA
+    state.add_patient(2, "cta_chest")     # CRITICAL
+    state.add_patient(3, "head")          # STAT
+    state.add_patient(4, "abdpel")        # ROUTINE
+    state.add_patient(3, "chest")         # STAT
+    state.add_patient(4, "spine")         # ROUTINE
     try:
         curses.wrapper(lambda scr: _main(scr, state))
     finally:
