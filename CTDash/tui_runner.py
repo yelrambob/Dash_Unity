@@ -29,11 +29,12 @@ Auto-spawning:
 Timing (at default speed 0.15):
   Transport arrival:  20-60 gs  →  3.0-9.0 real seconds
   En-route to bay:     5-30 gs  →  0.75-4.5 real seconds
+  Bay → scanner:      10-30 gs  →  1.5-4.5 real seconds
   Head CT scan:          20 gs  →  3.0 real seconds
   Abdomen/Pelvis scan:   50 gs  →  7.5 real seconds
   Trauma scan:           70 gs  →  10.5 real seconds
   Post-scan cooldown:    20 gs  →  3.0 real seconds
-  Oral contrast wait:   180 gs  →  27.0 real seconds
+  Oral contrast wait:   180 gs  →  27.0 real seconds  (scan unlocks at 80%)
   Leaving transport:   5-20 gs  →  0.75-3.0 real seconds
 
   One game-hour passes every 9 real minutes at speed 0.15.
@@ -60,22 +61,24 @@ if _here not in sys.path:
 # ---------------------------------------------------------------------------
 try:
     import config as cfg
-    SCAN_TIMES     = cfg.SCAN_TIMES
-    COOLDOWN_GS    = cfg.SCANNER_COOLDOWN
-    ARRIVAL_RANGE  = cfg.TRANSPORT_ARRIVAL_DELAY
-    HOLDWAIT_RANGE = cfg.TRANSPORT_HOLD_WAIT
-    LEAVING_RANGE  = cfg.TRANSPORT_LEAVING_DELAY
-    ORAL_GS        = cfg.ORAL_CONTRAST_WAIT
-    INJECTOR_GS    = cfg.INJECTOR_FILL_TIME
-    BAY_PROPER     = cfg.HOLDING_PROPER_SLOTS
-    BAY_OVERFLOW   = cfg.HOLDING_OVERFLOW_SLOTS
+    SCAN_TIMES            = cfg.SCAN_TIMES
+    COOLDOWN_GS           = cfg.SCANNER_COOLDOWN
+    ARRIVAL_RANGE         = cfg.TRANSPORT_ARRIVAL_DELAY
+    HOLDWAIT_RANGE        = cfg.TRANSPORT_HOLD_WAIT
+    LEAVING_RANGE         = cfg.TRANSPORT_LEAVING_DELAY
+    ORAL_GS               = cfg.ORAL_CONTRAST_WAIT
+    INJECTOR_GS           = cfg.INJECTOR_FILL_TIME
+    BAY_PROPER            = cfg.HOLDING_PROPER_SLOTS
+    BAY_OVERFLOW          = cfg.HOLDING_OVERFLOW_SLOTS
+    BAY_TO_SCANNER_RANGE  = getattr(cfg, "BAY_TO_SCANNER_DELAY", (10, 30))
 except ImportError:
-    SCAN_TIMES     = {"head": 20, "chest": 25, "spine": 30, "abdpel": 50,
-                      "trauma_full": 70, "cta_head": 45, "cta_chest": 35, "extremity": 35}
-    COOLDOWN_GS    = 20
-    ARRIVAL_RANGE  = (20, 60)
-    HOLDWAIT_RANGE = (5, 30)
-    LEAVING_RANGE  = (5, 20)
+    SCAN_TIMES            = {"head": 20, "chest": 25, "spine": 30, "abdpel": 50,
+                             "trauma_full": 70, "cta_head": 45, "cta_chest": 35, "extremity": 35}
+    COOLDOWN_GS           = 20
+    ARRIVAL_RANGE         = (20, 60)
+    HOLDWAIT_RANGE        = (5, 30)
+    LEAVING_RANGE         = (5, 20)
+    BAY_TO_SCANNER_RANGE  = (10, 30)
     ORAL_GS        = 180
     INJECTOR_GS    = 20
     BAY_PROPER     = 4
@@ -180,6 +183,7 @@ class S:
     TRANS_ENROUTE  = "TRANS_ENROUTE"
     IN_HOLDING     = "IN_HOLDING"
     ORAL_CONTRAST  = "ORAL_CONTRAST"
+    TO_SCANNER     = "TO_SCANNER"
     INJECTOR       = "INJECTOR"
     SCANNING       = "SCANNING"
     COOLDOWN       = "COOLDOWN"
@@ -208,6 +212,7 @@ class TUIPatient:
         self.oral_done         = False
         self.oral_timer_total  = 0.0   # real-seconds set when oral contrast starts
         self.wait_gs           = 0.0   # game-seconds waited (order placed → scan start)
+        self.to_scanner_gs     = random.randint(*BAY_TO_SCANNER_RANGE)
 
         # Arrival transport — 25% chance of significant delay
         _arr = random.randint(*ARRIVAL_RANGE)
@@ -243,6 +248,8 @@ class TUIPatient:
             slot = self.holding_slot + 1
             label = f"Overflow {slot - BAY_PROPER}" if self.holding_slot >= BAY_PROPER else f"Bay {slot}"
             return f"  IN HOLDING [{label}]"
+        elif s == S.TO_SCANNER:
+            return f"  TO SCANNER [{self.scanner_idx + 1}]  ({_fmt(t)} remaining)"
         elif s == S.ORAL_CONTRAST:
             if self.oral_timer_total > 0:
                 pct = max(0.0, 1.0 - self.timer / self.oral_timer_total) * 100
@@ -453,17 +460,14 @@ class TUIState:
             sc = self.scanners[idx]
             sc.patient_num = num
             p.scanner_idx  = idx
-            if p.iv_contrast:
-                p.status = S.INJECTOR
-                p.timer  = self._gs(INJECTOR_GS)
-                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                          f"injector fill on Scanner {idx+1}  "
-                          f"({_fmt(p.timer)} fill \u2192 {_fmt(self._gs(p.scan_gs))} scan)")
-            else:
-                p.status = S.SCANNING
-                p.timer  = self._gs(p.scan_gs)
-                self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
-                          f"scanning on Scanner {idx+1}  ({_fmt(p.timer)} remaining)")
+            # Free the holding bay slot — patient is leaving
+            if p.holding_slot >= 0:
+                self.holding[p.holding_slot] = None
+                p.holding_slot = -1
+            p.status = S.TO_SCANNER
+            p.timer  = self._gs(p.to_scanner_gs)
+            self._log(f"[{self.clock_str()}] #{num} {p.patient_id} \u2014 "
+                      f"en route to Scanner {idx+1}  ({_fmt(p.timer)} transit)")
             return ""
 
     def cmd_oral(self, num: int) -> str:
@@ -506,12 +510,16 @@ class TUIState:
             p = self._get(num)
             if p is None:
                 return f"No order #{num}"
-            recallable = (S.TRANS_ARRIVING, S.TRANS_ENROUTE, S.IN_HOLDING, S.ORAL_CONTRAST)
+            recallable = (S.TRANS_ARRIVING, S.TRANS_ENROUTE, S.IN_HOLDING,
+                          S.ORAL_CONTRAST, S.TO_SCANNER)
             if p.status not in recallable:
                 return f"#{num} cannot be recalled (status: {p.status})"
             if p.holding_slot >= 0:
                 self.holding[p.holding_slot] = None
                 p.holding_slot = -1
+            if p.scanner_idx >= 0:
+                self.scanners[p.scanner_idx].patient_num = None
+                p.scanner_idx = -1
             p.oral_done        = False
             p.oral_timer_total = 0.0
             p.status           = S.WAITING
@@ -589,6 +597,19 @@ class TUIState:
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
                       f"oral contrast 80% \u2014 ready to scan")
 
+        elif s == S.TO_SCANNER and p.timer <= 0:
+            if p.iv_contrast:
+                p.status = S.INJECTOR
+                p.timer  = self._gs(INJECTOR_GS)
+                self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                          f"arrived at Scanner {p.scanner_idx+1}, injector fill  "
+                          f"({_fmt(p.timer)} fill \u2192 {_fmt(self._gs(p.scan_gs))} scan)")
+            else:
+                p.status = S.SCANNING
+                p.timer  = self._gs(p.scan_gs)
+                self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
+                          f"arrived at Scanner {p.scanner_idx+1}, scanning  ({_fmt(p.timer)} remaining)")
+
         elif s == S.INJECTOR and p.timer <= 0:
             p.status = S.SCANNING
             p.timer  = self._gs(p.scan_gs)
@@ -640,6 +661,7 @@ STATUS_CP  = {
     S.TRANS_ENROUTE:  CP_TRANS,
     S.IN_HOLDING:     CP_STAT,
     S.ORAL_CONTRAST:  CP_CRITICAL,
+    S.TO_SCANNER:     CP_TRANS,
     S.INJECTOR:       CP_CRITICAL,
     S.SCANNING:       CP_SCANNER,
     S.COOLDOWN:       CP_SCANNER,
@@ -845,13 +867,14 @@ def _draw_scanners(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             row += 1
         elif p:
             phase_map = {
-                S.INJECTOR: ("INJECTOR FILL", CP_CRITICAL),
-                S.SCANNING: ("SCANNING",      CP_SCANNER),
-                S.COOLDOWN: ("COOLDOWN",      CP_CRITICAL),
+                S.TO_SCANNER: ("IN TRANSIT",   CP_TRANS),
+                S.INJECTOR:   ("INJECTOR FILL", CP_CRITICAL),
+                S.SCANNING:   ("SCANNING",      CP_SCANNER),
+                S.COOLDOWN:   ("COOLDOWN",      CP_CRITICAL),
             }
             label, pcp = phase_map.get(p.status, (p.status, CP_ROUTINE))
             timer_str = (f"  ({_fmt(p.timer)} rem)"
-                         if p.status in (S.INJECTOR, S.SCANNING, S.COOLDOWN) else "")
+                         if p.status in (S.TO_SCANNER, S.INJECTOR, S.SCANNING, S.COOLDOWN) else "")
             _saddstr(win, row, x + 3, f"\u25c8 {label}{timer_str}",
                      curses.color_pair(pcp) | curses.A_BOLD)
             row += 1
