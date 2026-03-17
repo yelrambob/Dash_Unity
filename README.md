@@ -16,8 +16,7 @@ The project currently has a **complete structural scaffold** (all classes, inter
 
 ```
 Dash_Unity/
-├── CLAUDE.md               # This file
-├── README.md               # Minimal placeholder
+├── README.md               # This file (AI assistant guidance — was originally CLAUDE.md)
 ├── file_tree.py            # One-time scaffold generator (do not re-run)
 └── CTDash/                 # Entire Python simulation package
     ├── __init__.py
@@ -164,7 +163,7 @@ Cooldown is `SCANNER_COOLDOWN = 20` game-seconds between scans.
 
 ### Scoring
 
-- `+100` per completed exam (`EXAM_BASE_SCORE`)
+- `+100` per completed exam (`EXAM_BASE_SCORE`) — note: the stub in `scoring_manager.py` currently hardcodes `+10`; replace with `EXAM_BASE_SCORE` from `config.py` when implementing
 - `-10` per game-minute over the acuity wait threshold (`WAIT_PENALTY_PER_MINUTE`)
 - `-50` flat per overflow patient (`OVERFLOW_PENALTY`)
 - `-150` flat per holdover at shift end (`HOLDOVER_PENALTY`)
@@ -275,12 +274,12 @@ def _tick(self):
 
 ## Git Workflow
 
-The designated development branch is `claude/claude-md-mmml03g71xgzfo4b-L2lHs`.
+The current development branch is `claude/update-dash-unity-docs-F4tGm`.
 
 ```bash
 git add <files>
 git commit -m "descriptive message"
-git push -u origin claude/claude-md-mmml03g71xgzfo4b-L2lHs
+git push -u origin claude/update-dash-unity-docs-F4tGm
 ```
 
 All commits go to this branch. Do not push to `main` or other branches.
