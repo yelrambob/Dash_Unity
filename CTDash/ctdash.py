@@ -363,6 +363,7 @@ class TUIState:
         self.log         : list = []
         self.lock        = threading.Lock()
         self._next_n     = 1
+        self.total_score : int  = 0
 
         # Game clock
         self.game_elapsed_gs = 0.0   # game-seconds since 07:00
@@ -693,9 +694,11 @@ class TUIState:
             if p.holding_slot >= 0:
                 self.holding[p.holding_slot] = None
                 p.holding_slot = -1
+            earned = p.calc_score()
+            self.total_score += earned
             p.status = S.DONE
             self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} \u2014 "
-                      f"departed, exam complete \u2713")
+                      f"departed, exam complete \u2713  {_score_str(earned)} pts")
 
     def stop(self):
         self._running = False
@@ -976,7 +979,7 @@ def _draw_title(win, state: TUIState, width: int):
     rate     = state.exams_per_hour()
     paused   = "  \u23f8 SPAWNING PAUSED" if not state.auto_spawn else ""
     left     = f"  CTDash TUI Test Runner"
-    right    = f"[\u23f0 {clock}]  [{rate:.1f}/hr]{paused}  speed:{state.speed:.2f}x  "
+    right    = f"SCORE: {state.total_score}  [\u23f0 {clock}]  [{rate:.1f}/hr]{paused}  speed:{state.speed:.2f}x  "
     _saddstr(win, 0, 0, left,  curses.color_pair(CP_TITLE) | curses.A_BOLD)
     _saddstr(win, 0, max(0, width - len(right) - 1), right,
              curses.color_pair(CP_TITLE) | curses.A_BOLD)
