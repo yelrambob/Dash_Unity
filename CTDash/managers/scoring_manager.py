@@ -10,7 +10,8 @@
 #
 # Drives level-up / level-down logic at end of shift.
 
-from config import WAIT_PENALTY_PER_MINUTE, OVERFLOW_PENALTY, HOLDOVER_PENALTY
+from config import EXAM_BASE_SCORE, WAIT_PENALTY_PER_MINUTE, OVERFLOW_PENALTY, HOLDOVER_PENALTY
+from data.acuity_table import ACUITY_TABLE
 
 
 class ScoringManager:
@@ -19,20 +20,23 @@ class ScoringManager:
         self.exams_completed = 0
         self.holdovers = 0
 
-    def exam_completed(self):
+    def exam_completed(self, acuity: int = None):
+        """Award base score for a completed exam."""
         self.exams_completed += 1
-        self.score += 10    # TODO: tune base score per exam
+        self.score += EXAM_BASE_SCORE
 
     def apply_wait_penalty(self, acuity: int, excess_seconds: int):
         """Called when a patient's wait exceeds their acuity threshold."""
-        # TODO: use acuity_table penalty_mult and WAIT_PENALTY_PER_MINUTE
-        pass
+        penalty_mult   = ACUITY_TABLE[acuity]["penalty_mult"]
+        excess_minutes = excess_seconds / 60.0
+        penalty        = int(excess_minutes * WAIT_PENALTY_PER_MINUTE * penalty_mult)
+        self.score    -= penalty
 
     def apply_overflow_penalty(self):
         self.score -= OVERFLOW_PENALTY
 
     def finalise(self, remaining_patients: list) -> int:
         """Called at end of shift. Applies holdover penalties, returns final score."""
-        self.holdovers = len(remaining_patients)
-        self.score -= self.holdovers * HOLDOVER_PENALTY
+        self.holdovers  = len(remaining_patients)
+        self.score     -= self.holdovers * HOLDOVER_PENALTY
         return self.score
