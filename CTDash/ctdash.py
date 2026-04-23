@@ -1001,14 +1001,29 @@ def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
         _saddstr(win, y_inp, 1, prompt + "\u2588", curses.color_pair(CP_CMD))
 
 
+def _draw_oral_alert(win, state: TUIState, width: int):
+    needs = [p for p in state.patients
+             if p.oral_contrast and not p.oral_started and p.status == S.IN_HOLDING]
+    if not needs:
+        return
+    hints = "  ".join(f"oral {p.number}" for p in needs)
+    msg = f"  ⚠  ORAL CONTRAST REQUIRED  —  {hints}  "
+    msg = msg.ljust(width - 1)
+    blink = int(time.monotonic() * 2) % 2
+    attr = curses.color_pair(CP_WARN) | curses.A_BOLD
+    if blink:
+        attr |= curses.A_REVERSE
+    _saddstr(win, 1, 0, msg, attr)
+
+
 def render(win, state: TUIState, cmd_buf: str, err: str):
     win.erase()
     height, width = win.getmaxyx()
 
     log_h   = 5
     cmd_h   = 3
-    panel_h = height - 1 - log_h - cmd_h
-    y0, y1  = 1, 1 + panel_h
+    panel_h = height - 2 - log_h - cmd_h   # row 1 reserved for oral alert
+    y0, y1  = 2, 2 + panel_h
     log_y   = y1
 
     ow = max(28, int(width * 0.36))
@@ -1025,6 +1040,7 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
 
     with state.lock:
         _draw_title(win, state, width)
+        _draw_oral_alert(win, state, width)
         _draw_orders(win, state, ox, ow, y0, y1)
         _draw_holding(win, state, hx, hw, y0, y1)
         _draw_scanners(win, state, sx, sw, y0, y1)
