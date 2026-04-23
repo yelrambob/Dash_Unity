@@ -214,11 +214,30 @@ class TUIPatient:
         self.holding_slot  = -1
         self.scanner_idx   = -1
         self.oral_done         = False
-        self.oral_started      = False  # True once oral N has been called
-        self.oral_bg_remaining = 0.0    # real-seconds left for pre-bay oral timer
-        self.oral_timer_total  = 0.0   # real-seconds set when oral contrast starts
-        self.wait_gs           = 0.0   # game-seconds waited (order placed → scan start)
+        self.oral_started      = False
+        self.oral_bg_remaining = 0.0
+        self.oral_timer_total  = 0.0
+        self.wait_gs           = 0.0
         self.to_scanner_gs     = random.randint(*BAY_TO_SCANNER_RANGE)
+
+        # Readiness blocker — IV contrast patients may have labs/IV access delays
+        if self.iv_contrast:
+            r = random.random()
+            if r < 0.35:
+                self.ready_delay_gs = 0.0
+                self.ready_reason   = None
+            elif r < 0.75:
+                self.ready_delay_gs = float(random.randint(30, 90))
+                self.ready_reason   = "labs pending"
+            else:
+                self.ready_delay_gs = float(random.randint(90, 180))
+                self.ready_reason   = "IV not placed"
+        else:
+            self.ready_delay_gs = 0.0
+            self.ready_reason   = None
+
+        # Oral contrast auto-schedule — nurse gives it in ED; random pre-delay before timer starts
+        self.oral_auto_delay_gs = float(random.randint(0, 45)) if self.oral_contrast else -1.0
 
         # Arrival transport — 25% chance of significant delay
         _arr = random.randint(*ARRIVAL_RANGE)
@@ -249,6 +268,10 @@ class TUIPatient:
             self.leaving_gs      = _lv
             self.leaving_delayed = False
 
+    @property
+    def is_ready(self) -> bool:
+        return self.wait_gs >= self.ready_delay_gs
+
     def status_line(self) -> str:
         s, t = self.status, self.timer
         if s == S.WAITING:
@@ -256,6 +279,12 @@ class TUIPatient:
                 pct = max(0.0, 1.0 - self.oral_bg_remaining / self.oral_timer_total) * 100
                 return (f"  WAITING  \u2014 oral contrast {pct:.0f}%  "
                         f"({_fmt(self.oral_bg_remaining)} remaining)")
+            if not self.is_ready:
+                remaining = max(0.0, self.ready_delay_gs - self.wait_gs)
+                return f"  WAITING  \u2014 {self.ready_reason}  ({_fmt(remaining)} remaining)"
+            if self.oral_contrast and not self.oral_started and self.oral_auto_delay_gs > self.wait_gs:
+                remaining = max(0.0, self.oral_auto_delay_gs - self.wait_gs)
+                return f"  WAITING  \u2014 oral scheduled in {_fmt(remaining)}"
             return "  WAITING"
         elif s == S.TRANS_ARRIVING:
             tag = "  \u26a0 SIGNIFICANT DELAY" if self.arrival_delayed else ""
@@ -469,6 +498,9 @@ class TUIState:
                 return f"No order #{num}"
             if p.status != S.WAITING:
                 return f"#{num} is not WAITING (currently: {p.status})"
+            if not p.is_ready:
+                remaining = max(0.0, p.ready_delay_gs - p.wait_gs)
+                return f"#{num} not ready — {p.ready_reason}  ({_fmt(remaining)} remaining)"
             p.status = S.TRANS_ARRIVING
             p.timer  = self._gs(p.arrival_gs)
             delay_note = "  \u26a0 SIGNIFICANT DELAY" if p.arrival_delayed else ""
@@ -484,7 +516,7 @@ class TUIState:
             if p.status != S.IN_HOLDING:
                 return f"#{num} must be IN_HOLDING to scan (currently: {p.status})"
             if p.oral_contrast and not p.oral_done:
-                return f"#{num} needs oral contrast first — type: oral {num}"
+                return f"#{num} oral contrast in progress — wait for 80%"
             idx = self._free_scanner()
             if idx == -1:
                 return "No scanner available right now"
@@ -600,6 +632,21 @@ class TUIState:
                     self._advance(p, dt, dt_gs)
 
     def _advance(self, p: TUIPatient, dt: float, dt_gs: float):
+        # Auto-start oral contrast after scheduled pre-delay
+        if (p.oral_contrast and not p.oral_started
+                and p.oral_auto_delay_gs >= 0
+                and p.wait_gs >= p.oral_auto_delay_gs):
+            gs = self._gs(ORAL_GS)
+            p.oral_started     = True
+            p.oral_timer_total = gs
+            if p.status == S.IN_HOLDING:
+                p.status = S.ORAL_CONTRAST
+                p.timer  = gs
+            else:
+                p.oral_bg_remaining = gs
+            self._log(f"[{self.clock_str()}] #{p.number} {p.patient_id} — "
+                      f"oral contrast started (auto)")
+
         # Background oral timer (pre-bay oral contrast, runs parallel to transport)
         if p.oral_started and not p.oral_done and p.oral_bg_remaining > 0:
             p.oral_bg_remaining = max(0.0, p.oral_bg_remaining - dt)
@@ -813,9 +860,10 @@ def _draw_orders(win, state: TUIState, x: int, w: int, y0: int, y1: int):
         row += 1
         if row >= lim:
             return False
-        # Line 4: oral contrast warning
-        if p.oral_contrast and not p.oral_started:
-            warn = f"  ⚠ ORAL NEEDED — type: o{p.number}"
+        # Line 4: readiness warning
+        if not p.is_ready:
+            remaining = max(0.0, p.ready_delay_gs - p.wait_gs)
+            warn = f"  ⚠ NOT READY — {p.ready_reason}  ({_fmt(remaining)})"
             _saddstr(win, row, x, warn.ljust(w - 1),
                      curses.color_pair(CP_WARN) | curses.A_BOLD | curses.A_REVERSE)
             row += 1
@@ -884,11 +932,8 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
                 return
             # Line 2: exam + wait time + hint
             waited = f"waited {_fmt(p.wait_gs)}"
-            needs_oral_start = p.oral_contrast and not p.oral_started and p.status == S.IN_HOLDING
-            if needs_oral_start:
-                hint      = f"oral {p.number}"
-                hint_attr = curses.color_pair(CP_WARN) | curses.A_BOLD
-            elif p.status == S.IN_HOLDING:
+            needs_oral_start = False  # oral now auto-starts
+            if p.status == S.IN_HOLDING:
                 hint      = f"scan {p.number}"
                 hint_attr = curses.color_pair(CP_CMD) | curses.A_BOLD
             elif p.status == S.SCAN_COMPLETE:
@@ -906,12 +951,8 @@ def _draw_holding(win, state: TUIState, x: int, w: int, y0: int, y1: int):
             if hint:
                 _saddstr(win, row, x + w - len(hint) - 3, hint, hint_attr)
             row += 1
-            # Line 3: oral warning banner or status line
-            if needs_oral_start and row < lim:
-                _saddstr(win, row, x + 2, "\u26a0  ORAL CONTRAST NEEDED  \u2014  give before scan",
-                         curses.color_pair(CP_WARN) | curses.A_BOLD)
-                row += 1
-            elif p.status != S.IN_HOLDING and row < lim:
+            # Line 3: status line for non-IN_HOLDING patients
+            if p.status != S.IN_HOLDING and row < lim:
                 s_attr = curses.color_pair(STATUS_CP.get(p.status, CP_ROUTINE))
                 _saddstr(win, row, x + 4, p.status_line().strip(), s_attr)
                 row += 1
