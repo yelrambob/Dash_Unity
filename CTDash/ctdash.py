@@ -1006,8 +1006,8 @@ def _draw_oral_alert(win, state: TUIState, width: int):
              if p.oral_contrast and not p.oral_started and p.status == S.IN_HOLDING]
     if not needs:
         return
-    hints = "  ".join(f"oral {p.number}" for p in needs)
-    msg = f"  ⚠  ORAL CONTRAST REQUIRED  —  {hints}  "
+    hints = "  ".join(f"o{p.number}" for p in needs)
+    msg = f"  ⚠  ORAL CONTRAST REQUIRED  —  type: {hints}  "
     msg = msg.ljust(width - 1)
     blink = int(time.monotonic() * 2) % 2
     attr = curses.color_pair(CP_WARN) | curses.A_BOLD
