@@ -987,7 +987,7 @@ def _draw_cmdbar(win, cmd_buf: str, err: str, height: int, width: int):
     y_hlp = height - 2
     y_inp = height - 1
     _hline(win, y_sep, 0, width)
-    help_txt = "t/trans <n>  o/oral <n>  s/scan <n>  l/leave <n>  rc/recall <n>  add  pause  clear  speed <f>  quit"
+    help_txt = "t<n>  o<n>  s<n>  l<n>  rc<n>  chain: t1t2t3  |  add  pause  clear  speed <f>  quit"
     _saddstr(win, y_hlp, 2, help_txt, curses.color_pair(CP_HEADER))
     prompt = f"> {cmd_buf}"
     if err:
@@ -1036,8 +1036,22 @@ def render(win, state: TUIState, cmd_buf: str, err: str):
 # ---------------------------------------------------------------------------
 def handle_command(raw: str, state: TUIState) -> str:
     import re
+    raw = raw.strip()
+
+    # Chained commands: t1t2t3  →  t1, t2, t3 each executed in order
+    tokens = re.findall(r'[a-zA-Z]+\d+', raw)
+    if len(tokens) > 1 and re.fullmatch(r'([a-zA-Z]+\d+)+', raw):
+        errors = []
+        for tok in tokens:
+            result = handle_command(tok, state)
+            if result == "__QUIT__":
+                return "__QUIT__"
+            if result:
+                errors.append(f"{tok}: {result}")
+        return "  |  ".join(errors) if errors else ""
+
     # Allow spaceless shortcuts: s1 → ["s", "1"],  t12 → ["t", "12"]
-    raw = re.sub(r'^([a-zA-Z]+)(\d+)$', r'\1 \2', raw.strip())
+    raw = re.sub(r'^([a-zA-Z]+)(\d+)$', r'\1 \2', raw)
     parts = raw.strip().split()
     if not parts:
         return ""
