@@ -6,6 +6,8 @@
 
 import heapq
 
+from config import TICK_SECONDS
+
 
 class QueueManager:
     def __init__(self):
@@ -14,20 +16,22 @@ class QueueManager:
         self._heap = []
         self._patients = {}    # patient_id -> Patient object
 
-    def add_patient(self, patient):
+    def add_patient(self, patient, game_second: int):
         """Add a newly spawned patient to the priority queue."""
-        # TODO: push onto heap, store in _patients dict
-        pass
+        heapq.heappush(self._heap, (patient.acuity, game_second, patient.patient_id))
+        self._patients[patient.patient_id] = patient
 
     def tick(self, game_second: int):
         """Advance wait timers for all queued patients."""
-        # TODO: increment wait_timer on each queued patient
-        pass
+        for patient in self._patients.values():
+            patient.wait_timer += TICK_SECONDS
 
     def pop_next(self):
         """Return the highest-priority patient and remove from queue."""
-        # TODO: pop from heap, return Patient object
-        pass
+        if not self._heap:
+            return None
+        _, _, patient_id = heapq.heappop(self._heap)
+        return self._patients.pop(patient_id)
 
     def is_empty(self) -> bool:
         return len(self._heap) == 0

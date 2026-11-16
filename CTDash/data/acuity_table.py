@@ -47,7 +47,7 @@ ACUITY_TABLE = {
         "queue_priority": 3,
         "spawn_weight":   0.80,           # the bulk of real volume — ~80% of all orders
         "typical_exams":  ["head", "abdpel", "chest", "spine", "cta_chest", "extremity"],
-        "wait_threshold": 15 * 60,        # 15 game-minutes — more forgiving
+        "wait_threshold": 25 * 60,        # 25 game-minutes — reflects real STAT reality
         "penalty_mult":   1.5,
         "can_downgrade":  False,          # nothing to downgrade to — already the bulk tier
         "notes": "Everything labeled STAT that isn't Tier 1 or 2. "

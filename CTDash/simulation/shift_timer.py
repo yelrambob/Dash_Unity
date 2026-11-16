@@ -10,9 +10,14 @@ GAME_START_HOUR = 6    # simulation starts at 06:00
 
 
 class ShiftTimer:
-    def __init__(self):
+    def __init__(self, duration_hours: int = GAME_DURATION_HOURS):
         self._elapsed_seconds = 0
-        self._total_seconds   = GAME_DURATION_HOURS * 3600
+        self._total_seconds   = duration_hours * 3600
+
+    @property
+    def game_second(self) -> int:
+        """Total elapsed game-seconds since shift start."""
+        return self._elapsed_seconds
 
     @property
     def game_hour(self) -> int:
